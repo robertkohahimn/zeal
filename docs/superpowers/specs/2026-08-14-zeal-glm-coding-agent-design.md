@@ -90,6 +90,11 @@ dependency. The launcher owns this for `code-runtime`; the MCP documentation
 owns it for `@deepseek-ai/dsh-mcp-client` (§4.5). `dsh plugin` warns on
 non-bundle dependencies by design ("a plain library is fine").
 
+The bundle also declares `code-runtime` in its own `dependencies`
+(belt-and-braces under V5), and the README documents the launcher-less manual
+install as the two-package form:
+`dsh plugin --profile zeal add @zealagent/dsh-zeal @deepseek-ai/dsh-code-runtime-worker-thread`.
+
 ### 2.3 Version discipline (review A2)
 
 Every `@deepseek-ai/*` dependency is an RC on a codebase that promises breaking
@@ -142,9 +147,10 @@ Injects `['agentDefaultModel', 'agents', 'sessions', 'approval', 'userQuestions'
 API demonstrated by the headless runner:
 
 - create: `agents.create({ sessionId, meta: { cwd }, agentOptions, setup })` with
-  `installModelSelection`; resume: the registry's resume path (`ResumeAgentOptions`)
-  fed by `--resume` or the `/resume` picker (session list via base's
-  `session-query-sqlite`);
+  `installModelSelection`; resume: via the registry's resume path
+  (`ResumeAgentOptions` exists per the `dsh-agent` README; the exact
+  load-and-resume flow and the `session-query-sqlite` picker API are open item
+  **V6**), fed by `--resume` or the `/resume` picker;
 - send: `agent.followup(createUserMessage(...))`; quiescence: `agent.whenIdle()`;
 - input typed mid-turn queues as the next `followup`;
 - interrupt (Esc): via the loop's abort path — exact API is open item **V2**;
@@ -374,8 +380,11 @@ driver is unexported test infrastructure. Runs compose the real zeal patch plus
 a **gauntlet overlay** that: disables the `zeal-tui`/`zeal-startup` rows (a
 scripted run must not grab the terminal, and the deployment gets exactly one
 approval answerer — sibling listener order is not a priority mechanism); mounts
-the driver and an auto-approve answerer (without it, `ask` + fail-closed
-deadlocks the first bash call); and, for G7, sets a shrunk
+the driver, an auto-approve answerer, **and a machine `UserQuestionProvider`**
+(the approval seam alone is not enough: plan review arrives through the
+user-questions seam — §3.3 — so G3 would deadlock at `ctx.userQuestions.ask()`
+with no provider registered; both fail-closed seams need machine substitutes);
+and, for G7, sets a shrunk
 `contextWindow` on the route's model entry so compaction triggers for pennies
 instead of ~800k real tokens against glm-5.2's 1M window. G8 and approval flows
 are manual TUI passes.
@@ -389,6 +398,8 @@ are manual TUI passes.
 | V3 | `session-persistence-jsonl` write cadence (streaming vs flush-only) | if flush-only, TUI adds periodic flush (e.g., per `turn/end`); crash-recovery claim in §3.5/§5.1 is conditional on this |
 | V4 | `session-title-first-prompt-llm` model routing with `llm-deepseek` disabled (review N2) | if it pins DeepSeek, titles fail silently → reconfigure or disable the row |
 | V5 | Loader resolution anchor for out-of-tree plugin names | design already avoids depending on it (C2/C3); verifying may relax the direct-dep rule |
+| V6 | Exact session resume flow (`ResumeAgentOptions` load path) and `session-query-sqlite` picker API | type names verified in READMEs; both are exercised by the web surface |
+| V7 | `llm-pi-ai:` settings-section layering semantics (whole-dict replace vs per-route merge) | `$DSH_HOME/settings.yaml` is home-level and shared across profiles — a section written by a prior `dsh web` run overrides Zeal's entry-config routes; wrong assumption → Zeal boots with zero GLM routes. Onboarding panel (§3.6) must mention this override path if V7 confirms replacement semantics |
 
 ## 8. Out of scope for v1
 
