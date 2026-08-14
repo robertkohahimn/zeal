@@ -2,6 +2,7 @@ import { createRequire } from 'node:module'
 import { readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { spawnSync } from 'node:child_process'
 
 const ZEAL_PROFILE = 'zeal'
@@ -65,6 +66,26 @@ export function resolveDshBin(): string {
   return join(dshPackageDir, relativeBinPath)
 }
 
+/** The subset of `SpawnSyncReturns` that the install-outcome decision needs. */
+export interface SpawnOutcome {
+  status: number | null
+  error?: Error | undefined
+}
+
+/**
+ * Pure decision: whether the launch step should proceed given the outcome
+ * of the install step. Any spawn-level error, or a non-zero/null exit
+ * status, blocks the launch — only a clean `status === 0` allows it.
+ */
+export function shouldLaunch(installOutcome: SpawnOutcome): boolean {
+  return !installOutcome.error && installOutcome.status === 0
+}
+
+/** Resolves an exit code to report/exit with for a failed install outcome. */
+function installExitCode(installOutcome: SpawnOutcome): number {
+  return installOutcome.error ? 1 : (installOutcome.status ?? 1)
+}
+
 function getDshHome(): string {
   return process.env.DSH_HOME ?? join(homedir(), '.dsh')
 }
@@ -86,14 +107,22 @@ export function main(argv: string[] = process.argv.slice(2)): void {
   const dshBin = resolveDshBin()
 
   if (plan.needsInit) {
-    spawnSync(process.execPath, [dshBin, ...plan.installArgs], { stdio: 'inherit' })
+    const installResult = spawnSync(process.execPath, [dshBin, ...plan.installArgs], {
+      stdio: 'inherit',
+    })
+    if (!shouldLaunch(installResult)) {
+      const exitCode = installExitCode(installResult)
+      const reason = installResult.error ? installResult.error.message : `exit code ${exitCode}`
+      process.stderr.write(`zeal: failed to install the zeal dsh profile (${reason})\n`)
+      process.exit(exitCode)
+    }
   }
 
   const child = spawnSync(process.execPath, [dshBin, ...plan.launchArgs], { stdio: 'inherit' })
   process.exit(child.status ?? 1)
 }
 
-const isMainModule = process.argv[1] && import.meta.url === `file://${process.argv[1]}`
+const isMainModule = Boolean(process.argv[1]) && import.meta.url === pathToFileURL(process.argv[1] as string).href
 if (isMainModule) {
   main()
 }

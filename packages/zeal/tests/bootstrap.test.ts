@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { planBootstrap, resolveDshBin } from '../src/main.ts'
+import { planBootstrap, resolveDshBin, shouldLaunch } from '../src/main.ts'
 
 const INSTALL_ARGS = [
   'plugin',
@@ -55,5 +55,23 @@ describe('resolveDshBin', () => {
   it('resolves to an existing dsh binary file', () => {
     const bin = resolveDshBin()
     expect(existsSync(bin)).toBe(true)
+  })
+})
+
+describe('shouldLaunch', () => {
+  it('allows launch when the install exited cleanly', () => {
+    expect(shouldLaunch({ status: 0 })).toBe(true)
+  })
+
+  it('blocks launch when the install exited with a non-zero status', () => {
+    expect(shouldLaunch({ status: 1 })).toBe(false)
+  })
+
+  it('blocks launch when the install status is null (e.g. killed by signal)', () => {
+    expect(shouldLaunch({ status: null })).toBe(false)
+  })
+
+  it('blocks launch when the install spawn itself errored', () => {
+    expect(shouldLaunch({ status: 0, error: new Error('spawn ENOENT') })).toBe(false)
   })
 })
