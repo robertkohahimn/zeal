@@ -156,17 +156,17 @@ export default defineConfig({
   "scripts": { "build": "tsdown src/startup.ts src/gauntlet-runner.ts src/tui/index.ts --dts --format esm --out-dir lib" },
   "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
   "dependencies": {
-    "@deepseek-ai/cordis": "0.1.0-rc.1",
-    "@deepseek-ai/schemastery": "0.1.0-rc.1",
+    "@deepseek-ai/cordis": "4.0.1",
+    "@deepseek-ai/schemastery": "3.18.1",
     "@deepseek-ai/dsh-agent": "0.1.0-rc.6",
     "@deepseek-ai/dsh-cmdline": "0.0.1-rc.1",
-    "@deepseek-ai/dsh-code-runtime-worker-thread": "0.0.1-rc.1",
+    "@deepseek-ai/dsh-code-runtime-worker-thread": "0.0.1-rc.3",
     "@deepseek-ai/dsh-commands": "0.0.1-rc.1",
     "@deepseek-ai/dsh-llm": "0.0.1-rc.1",
     "@deepseek-ai/dsh-session": "0.0.1-rc.1",
     "@deepseek-ai/dsh-session-query": "0.0.1-rc.1",
     "@deepseek-ai/dsh-user-approval": "0.0.1-rc.1",
-    "@deepseek-ai/dsh-user-questions": "0.0.1-rc.1",
+    "@deepseek-ai/dsh-user-questions": "0.0.1-rc.3",
     "commander": "^13.0.0",
     "ink": "^7.1.1",
     "marked": "^18.0.9",
@@ -180,7 +180,7 @@ export default defineConfig({
   }
 }
 ```
-Note: the exact version and existence of `@deepseek-ai/cordis` / `@deepseek-ai/schemastery` on npm must be checked the same way; if a package is not published standalone, import it via the path the published `@deepseek-ai/dsh-agent` re-exports (check `node_modules/@deepseek-ai/dsh-agent/package.json` `dependencies` after install and pin those).
+Note (verified 2026-08-14): `@deepseek-ai/cordis@4.0.1` and `@deepseek-ai/schemastery@3.18.1` are published standalone. After the first install, open `node_modules/@deepseek-ai/dsh-agent/package.json` and align our `cordis`/`schemastery` pins to the exact versions the dsh packages themselves resolve — two live copies of cordis would mean two `Context` identities and broken service keys; pnpm's hoisted profile layout dedupes only when the versions agree.
 
 `packages/dsh-zeal/tsconfig.json`:
 ```json
@@ -400,22 +400,28 @@ export function parseZealArgs(args: string[]): ZealStartupValues {
   return values
 }
 
+function valuesFromOpts(opts: { resume?: string; model?: string }): ZealStartupValues {
+  const values: ZealStartupValues = {}
+  if (opts.resume !== undefined) values.resumeSessionId = opts.resume
+  if (opts.model !== undefined) values.model = opts.model
+  return values
+}
+
 export function apply(ctx: Context): void {
   // Mirror dsh-headless/startup: commander owns --help and parse errors,
-  // parseCmdline binds it to the launcher-provided argument snapshot.
+  // parseCmdline binds the program to the launcher-provided argument snapshot
+  // (ctx.cmdlineArgs) — never touch process.argv here. The action fires after
+  // commander parsed that snapshot, so it reads program.opts() directly.
   const program = new Command('zeal')
     .option('--resume <sessionId>', 'resume a persisted session')
     .option('--model <id>', 'initial model id on the default route')
   program.action(() => {
-    ctx.provide('zealStartup', parseZealArgs(program.args.length ? program.args : process.argv.slice(2)) )
+    ctx.provide('zealStartup', valuesFromOpts(program.opts()))
   })
-  // NOTE for implementer: copy the exact program.action/ctx.provide/parseCmdline
-  // arrangement from $DSH_SRC/packages/bundle/headless/src/startup.ts:49-60 —
-  // including how it reads parsed option values rather than re-parsing argv.
   parseCmdline(ctx, program)
 }
 ```
-Adjust `apply` to match the headless startup file exactly (it reads commander's parsed options inside the action; the snippet above marks the one place to align). `parseZealArgs` stays the pure, tested core.
+Refactor `parseZealArgs` to delegate to `valuesFromOpts` so the pure, tested core and `apply` share one mapping. Before wiring, compare against `$DSH_SRC/packages/bundle/headless/src/startup.ts:49-60` and match its `parseCmdline` arrangement exactly.
 
 - [ ] **Step 4: Run to verify it passes**, plus `pnpm typecheck`.
 
@@ -898,17 +904,7 @@ Behavior: `needsInit` when `$DSH_HOME/profiles/zeal/package.json` is missing or 
 
 ---
 
-### Task 17: Live smoke test (credential-gated)
-
-**Files:**
-- Create: `packages/dsh-zeal/tests/composition/live-smoke.test.ts`
-
-- [ ] **Step 1: Write the test**, `describe.skipIf(!process.env.ZAI_API_KEY || !process.env.ZEAL_COMPOSITION)`: reuse `setupProfile`; write a gauntlet-style overlay patch into the profile's `cordis.patch.yml` that disables `zeal-tui`/`zeal-startup` and inserts `@zealagent/dsh-zeal/gauntlet-runner` (Task 18 — implement that task first if executing out of order; the two tasks may be swapped) with config task `"Run: echo zeal-smoke-$((6*7)) and tell me the exact output"`; run `dsh --profile zeal <task>`; assert stdout contains `zeal-smoke-42`.
-- [ ] **Step 2: Run with a real key once locally → PASS. Step 3: Commit.** `git commit -am "test(zeal): credential-gated live GLM smoke"`
-
----
-
-### Task 18: Gauntlet runner + overlay + G1
+### Task 17: Gauntlet runner + overlay + G1
 
 **Files:**
 - Create: `packages/dsh-zeal/src/gauntlet-runner.ts`, `gauntlet/overlay.cordis.yml`, `gauntlet/run.sh`, `gauntlet/tasks/g1-fix-test/{task.txt,verify.sh,repo/…}`, `GAUNTLET.md`, `packages/dsh-zeal/tests/gauntlet-runner.test.ts`
@@ -925,6 +921,17 @@ Behavior: `needsInit` when `$DSH_HOME/profiles/zeal/package.json` is missing or 
   disabled: true
 - id: zeal-startup
   disabled: true
+
+# Store session logs uncompressed so verify.sh can grep them for tool events.
+# A patch REPLACES the row's whole config, so root must be restated — copy the
+# exact base value from $DSH_SRC/packages/bundle/base/cordis.patch.yml
+# (root: !!js dshHomePath('sessions')). Base's default is zstd; grep on
+# compressed frames silently matches nothing.
+- id: session-persistence-jsonl
+  config:
+    root: !!js dshHomePath('sessions')
+    compression: none
+
 - insert:
     - id: zeal-gauntlet-runner
       name: '@zealagent/dsh-zeal/gauntlet-runner'
@@ -942,6 +949,16 @@ Behavior: `needsInit` when `$DSH_HOME/profiles/zeal/package.json` is missing or 
 
 ---
 
+### Task 18: Live smoke test (credential-gated)
+
+**Files:**
+- Create: `packages/dsh-zeal/tests/composition/live-smoke.test.ts`
+
+- [ ] **Step 1: Write the test**, `describe.skipIf(!process.env.ZAI_API_KEY || !process.env.ZEAL_COMPOSITION)`: reuse `setupProfile` (Task 16) and the gauntlet overlay (Task 17) — append `gauntlet/overlay.cordis.yml` to the profile's `cordis.patch.yml`; run `env ZEAL_TASK='Run: echo zeal-smoke-$((6*7)) and tell me the exact output' dsh --profile zeal`; assert stdout contains `zeal-smoke-42`.
+- [ ] **Step 2: Run with a real key once locally → PASS. Step 3: Commit.** `git commit -am "test(zeal): credential-gated live GLM smoke"`
+
+---
+
 ### Task 19: Gauntlet G2–G8
 
 **Files:**
@@ -954,7 +971,7 @@ Content per task (each gets its own commit; run each once with a real key and re
 - **G4 subagent:** task: `Use a subagent to audit src/ for TODO comments and then fix each one it reports.`; repo with 3 TODO-marked bugs; verify: vitest + session grep for `"subagent"` tool events.
 - **G5 MCP:** repo contains `mcp-server.mjs` — a ~30-line stdio MCP server via `@modelcontextprotocol/sdk` exposing tool `lookup_constant` returning `{"ZEAL_MAGIC": 271828}`; `run.sh` for this task additionally appends the `dsh-mcp-client` row (transport stdio, command `node mcp-server.mjs`) to the profile patch and runs `dsh plugin --profile zeal add @deepseek-ai/dsh-mcp-client` first (this task IS the doc-flow rehearsal for spec §4.5); task: `Call the lookup_constant tool from the mcp server and write its value into constant.txt.`; verify: `grep -q 271828 constant.txt`.
 - **G6 skill:** repo carries `AGENTS.md` (or the skill layout base's `skill-filesystem` documents — check `$DSH_SRC/packages/skill/skill-filesystem/README.md` and use its real discovery path) mandating: every new function gets a `@zeal-checked` JSDoc tag; task: add a small function; verify: grep for the tag + vitest.
-- **G7 compaction:** overlay for this task also retargets `llm-pi-ai` route `zai` with `models: [{ id: glm-5.2, contextWindow: 16384 }]` (per-route model reshape — spec A11) so compaction triggers cheaply; repo: 8 files of ~200 lines each; task: summarize every file then fix the one failing test; verify: vitest + session grep for a compaction event type (transcribe the exact event name from `$DSH_SRC/packages/compaction/compaction-basic`).
+- **G7 compaction:** overlay for this task also retargets `llm-pi-ai` — restating the FULL row config (patch replaces whole config: both routes with their `apiKeyEnv`/`reasoning` values from Task 2, plus route `zai` gaining `models: [{ id: glm-5.2, contextWindow: 16384 }]`, a per-route model reshape — spec A11) so compaction triggers cheaply; repo: 8 files of ~200 lines each; task: summarize every file then fix the one failing test; verify: vitest + session grep for a compaction event type (transcribe the exact event name from `$DSH_SRC/packages/compaction/compaction-basic`).
 - **G8 interrupt (manual):** `gauntlet/tasks/g8-interrupt/manual.md` — scripted steps: start `zeal` in a scratch repo, ask for a long task, press Esc mid-turn, verify the status returns to idle and a redirect message steers the next turn; record observations in GAUNTLET.md.
 
 - [ ] Each: build repo + task + verify → run → record → commit (`feat(zeal): gauntlet G<n>`).
@@ -974,15 +991,15 @@ Required content (spec §4, V5, V7, N1–N3): quickstart (`npx @zealagent/zeal`,
 
 ## Milestone map (for review pacing)
 
-- **M1 — provider proof:** Tasks 1–3, 16 (invariants only), 17. Zeal composes and one real GLM turn works headless.
+- **M1 — provider proof:** Tasks 1–3 (with a temporary no-op `src/tui/index.ts` stub so the bundle's `./tui` export builds), 16 (invariants only), 17 (runner + G1), 18. Zeal composes and one real GLM turn works headless.
 - **M2 — core TUI:** Tasks 4–10, 14 (partial: no commands), interactive session usable.
 - **M3 — full capability:** Tasks 11–15 complete.
-- **M4 — quality bar:** Tasks 16 (snapshot) –20.
+- **M4 — quality bar:** Tasks 16 (snapshot), 19, 20.
 
 Executors follow task order as written; the milestone map only tells reviewers what "working" means at each stage.
 
 ## Self-review (performed at write time)
 
-- Spec coverage: §2 packages → Tasks 1/15; §3 TUI (driver/answerers/renderer/editor/commands/exit/onboarding) → Tasks 4–14; §4 patch rows + MCP doc-flow → Tasks 2/19-G5/20; §5 error+security → Tasks 5 (notices), 13 (fail-closed mapping), 14 (exit paths), 18 (overlay never shipped: it lives in `gauntlet/`, not in the bundle's patch); §6 five layers → Tasks 5–10 (unit/component), 16 (composition), 17 (smoke), 18–19 (gauntlet); N1 no-dollar rule → Task 9.
+- Spec coverage: §2 packages → Tasks 1/15; §3 TUI (driver/answerers/renderer/editor/commands/exit/onboarding) → Tasks 4–14; §4 patch rows + MCP doc-flow → Tasks 2/19-G5/20; §5 error+security → Tasks 5 (notices), 13 (fail-closed mapping), 14 (exit paths), 18 (overlay never shipped: it lives in `gauntlet/`, not in the bundle's patch); §6 five layers → Tasks 5–10 (unit/component), 16 (composition), 18 (smoke), 17+19 (gauntlet); N1 no-dollar rule → Task 9.
 - Known deliberate deferrals to execution time (not placeholders): exact `SessionEventMap`/approval-request field names are transcribed in Tasks 4/13 from cited files; `@deepseek-ai/cordis`/`schemastery` publish-form check in Task 1. Each names the file to read and the fallback.
 - Type consistency: `ZealEvent`/`TranscriptEntry`/`PendingInteraction`/`QuestionItem`/`ApprovalDecision`/`ZealDriver`/`CommandDispatcher` names match across Tasks 4–14.
