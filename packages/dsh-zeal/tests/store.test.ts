@@ -136,6 +136,16 @@ describe('ZealStore fold semantics', () => {
     store.apply(fixtures.reasoningChunk('x', 1)) // lower seq
     expect(store.getState()).toEqual(snapshot)
   })
+
+  it('(CRITICAL-1) does not drop a seq-0 event on a fresh store (session seqs start at 0)', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    store.apply(fixtures.turnStart(0))
+    expect(store.getState().live).toEqual({ text: '', reasoning: '', tools: [] })
+    expect(store.getState().status.running).toBe(true)
+    // A second, later event still folds normally after the seq-0 event landed.
+    store.apply(fixtures.textChunk('hi', 1))
+    expect(store.getState().live?.text).toBe('hi')
+  })
 })
 
 describe('ZealStore fold interleavings (review findings)', () => {

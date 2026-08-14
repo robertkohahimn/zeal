@@ -60,7 +60,14 @@ interface InteractionEntry {
 
 export class ZealStore {
   private state: ZealViewState
-  private lastSeq = 0
+  /**
+   * Highest applied `seq`, or `-1` before any event has been applied.
+   * Session seqs start at 0 (`Session.seq` is the log length), so the guard
+   * below must treat `-1` as "nothing applied yet" rather than `0` — an
+   * initial `0` would silently drop a genuine seq-0 event (e.g. a resumed
+   * session's very first `turn/start`).
+   */
+  private lastSeq = -1
   private readonly listeners = new Set<() => void>()
   private timer: ReturnType<typeof setTimeout> | undefined
   private readonly interactionQueue: InteractionEntry[] = []
@@ -97,7 +104,11 @@ export class ZealStore {
 
   /** Append a store-originated (not session-event-driven) notice, e.g. connection status. */
   addNotice(level: 'info' | 'error', text: string): void {
-    this.state = { ...this.state, settled: [...this.state.settled, this.notice(this.lastSeq, level, text)] }
+    // Clamp to 0 before any real event has landed — `lastSeq` starts at -1
+    // purely so the seq-0-event guard below works; a notice's display seq
+    // should never go negative.
+    const seq = Math.max(this.lastSeq, 0)
+    this.state = { ...this.state, settled: [...this.state.settled, this.notice(seq, level, text)] }
     this.scheduleNotify()
   }
 

@@ -18,8 +18,18 @@
  * `session/event` firehose (`Session.firstLiveSeq`'s doc comment — "constructor
  * seeds do not emit"). `start` replays that seed into the store once the
  * handle resolves; `ZealStore.apply`'s `seq <= lastSeq` guard (`store.ts`)
- * makes any theoretical overlap with a later live dispatch a no-op, so the
- * replay never needs its own dedup bookkeeping.
+ * makes any theoretical overlap between the seed replay and a live dispatch a
+ * no-op — PROVIDED the seed lands first. It does not on its own: `setup`'s
+ * `session/event` listener is live from the moment it registers (before
+ * either `create`/`resume` returns), so a live event dispatched while `start`
+ * is still awaiting that promise would otherwise reach the store BEFORE the
+ * seed replay loop runs below, bumping `lastSeq` past the whole seed range
+ * and silently dropping it (not deduping it — losing it). `start` closes that
+ * window by buffering every live `session/event` behind `liveBuffered`/
+ * `bufferingLive` until the seed replay (or, for a fresh `create`, the
+ * no-op equivalent) completes, then drains the buffer in arrival order. Seed
+ * events always have lower seqs than anything buffered this way, so replay-
+ * then-drain is already the correct ascending-seq order.
  * @module @zealagent/dsh-zeal/tui/driver
  */
 
@@ -32,6 +42,7 @@ import type { Agent, AgentOptions, ModelSelection, ModelSelectionRef } from '@de
 import type {} from '@deepseek-ai/dsh-agent-default-model'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { SessionRecord, SessionTitleObservationResult } from '@deepseek-ai/dsh-session-query'
 import type { ZealStore } from './store.ts'
 
@@ -106,11 +117,25 @@ export class ZealDriver {
     const selection: ModelSelectionRef = { current: initial, assembled: undefined }
     const agentOptions: AgentOptions = { provider: initial.provider, model: initial.model }
 
+    // See the module doc's "live-before-replay" note: buffer every live
+    // `session/event` until the seed replay below (or its create-path no-op)
+    // completes, so a live dispatch that arrives while `create`/`resume` is
+    // still pending can never overtake — and thereby erase — the seed.
+    let bufferingLive = true
+    const liveBuffered: SessionEvent[] = []
+
     const setup = (agentCtx: Context): void => {
       installModelSelection(agentCtx, selection)
       agentCtx.on('session/event', (_session, event) => {
-        store.apply(event)
+        if (bufferingLive) liveBuffered.push(event)
+        else store.apply(event)
       })
+    }
+
+    const releaseBufferedLive = (): void => {
+      bufferingLive = false
+      for (const event of liveBuffered) store.apply(event)
+      liveBuffered.length = 0
     }
 
     if (opts.resumeSessionId !== undefined) {
@@ -120,10 +145,11 @@ export class ZealDriver {
         setup,
       })
       // The resumed session's persisted history never crossed the
-      // `session/event` firehose (see module doc); replay it once now. The
-      // store's seq guard makes this safe even if a live dispatch also
-      // covers part of this range.
+      // `session/event` firehose (see module doc); replay it once now, THEN
+      // release anything buffered above — seed seqs are always lower, so
+      // this order is already correct ascending-seq order.
       for (const event of agent.session.events) store.apply(event)
+      releaseBufferedLive()
       return new ZealDriver(ctx, selection, agent)
     }
 
@@ -133,6 +159,7 @@ export class ZealDriver {
       agentOptions,
       setup,
     })
+    releaseBufferedLive()
     return new ZealDriver(ctx, selection, agent)
   }
 
@@ -146,12 +173,21 @@ export class ZealDriver {
     this.liveAgent.cancel({ kind: 'user' }, { keepInbox: true })
   }
 
-  /** Mutate the live selection ref; the next step's prompt assembly and request config pick it up. */
+  /**
+   * Mutate the live selection ref; the next step's prompt assembly and
+   * request config pick it up.
+   *
+   * Deliberately drops any carried `reasoningEffort`: effort is
+   * adapter/model-owned, so a value tuned for the old model is not assumed
+   * valid for the new one. `installModelSelection`'s `agent/request`
+   * handler documents exactly this path — "an absent selected effort clears
+   * any inherited effort, restoring the selected model's provider/default
+   * behavior" — which only fires when the new selection omits
+   * `reasoningEffort` entirely, not merely sets it to `undefined`.
+   */
   switchModel(model: string, provider?: string): void {
     const current = this.selection.current
-    const next: ModelSelection = { provider: provider ?? current?.provider ?? '', model }
-    if (current?.reasoningEffort !== undefined) next.reasoningEffort = current.reasoningEffort
-    this.selection.current = next
+    this.selection.current = { provider: provider ?? current?.provider ?? '', model }
   }
 
   /**

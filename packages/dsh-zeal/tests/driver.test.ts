@@ -228,6 +228,72 @@ describe('ZealDriver', () => {
     expect(store.getState().settled.filter(e => e.kind === 'user')).toHaveLength(1)
   })
 
+  it('(CRITICAL-1) resume replays a seed starting at seq 0 without dropping it', async () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    const agentCtxCalls: FakeAgentCtx[] = []
+    // Session.seq is the log length, so a session's very first event is seq
+    // 0. Deliberately no turn/end here: a dropped turn/start(0) would be
+    // masked once a later turn/end clears `live` anyway, so this seed leaves
+    // `live` observable after replay — a store that dropped the seq-0 event
+    // (the `lastSeq = 0` bug) would leave `live` `undefined` here instead.
+    const seed = [fixtures.turnStart(0), fixtures.userMessage('seq zero fact', 1)]
+    const session = new FakeSession('resumed-from-zero', seed, 2)
+    const { agents, calls } = fakeAgents(session, agentCtxCalls)
+    const ctx = fakeCtx({ agents, agentDefaultModel: fakeDefaultModel() })
+
+    await ZealDriver.start(ctx, store, { resumeSessionId: 'resumed-from-zero' })
+
+    expect(calls.resume).toHaveLength(1)
+    const state = store.getState()
+    expect(state.live).toEqual({ text: '', reasoning: '', tools: [] })
+    const userEntries = state.settled.filter(e => e.kind === 'user')
+    expect(userEntries).toHaveLength(1)
+    expect(userEntries[0]).toMatchObject({ text: 'seq zero fact' })
+  })
+
+  it('(IMPORTANT-4) a live event delivered before replay does not lose the seed, and is not itself lost', async () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    const seed = [fixtures.turnStart(1), fixtures.userMessage('seeded fact', 2), fixtures.turnEnd('completed', 3)]
+    const session = new FakeSession('race-session', seed, 3)
+    const agentCtx = new FakeAgentCtx()
+    // A "live" event with a higher seq than anything in the seed — arrives
+    // WHILE resume() is still pending, i.e. before driver.ts's replay loop
+    // (which only runs after resume()'s returned promise settles) has run.
+    const liveEvent = fixtures.requestHeader('late-provider', 'late-model', 4)
+
+    const agents = {
+      create: async (): Promise<{ agent: Agent; dispose: () => Promise<void> }> => {
+        throw new Error('create should not be called in this test')
+      },
+      resume: async (options: ResumeAgentOptions): Promise<{ agent: Agent; dispose: () => Promise<void> }> => {
+        await options.setup?.(agentCtx as unknown as Context)
+        // Simulate the race: a live dispatch fires before this resume() call
+        // (and therefore driver.ts's replay loop) has returned.
+        agentCtx.fire('session/event', {}, liveEvent)
+        return { agent: new FakeAgent(session) as unknown as Agent, dispose: async () => {} }
+      },
+    }
+    const ctx = fakeCtx({ agents, agentDefaultModel: fakeDefaultModel() })
+
+    await ZealDriver.start(ctx, store, { resumeSessionId: 'race-session' })
+
+    const state = store.getState()
+    const userEntries = state.settled.filter(e => e.kind === 'user')
+    // The seed must still be fully present — this is the assertion that
+    // would fail (empty array) under the pre-fix bug, where the early live
+    // event bumps lastSeq past the whole seed range before replay runs.
+    expect(userEntries).toHaveLength(1)
+    expect(userEntries[0]).toMatchObject({ text: 'seeded fact' })
+    // The live event itself must not be lost either — it lands right after
+    // the seed once the buffer is released.
+    expect(state.status.provider).toBe('late-provider')
+    expect(state.status.model).toBe('late-model')
+
+    // No duplicates: re-applying a seed event afterward is still a no-op.
+    store.apply(fixtures.userMessage('seeded fact', 2))
+    expect(store.getState().settled.filter(e => e.kind === 'user')).toHaveLength(1)
+  })
+
   it('(e) listSessions merges titles onto rows and drops failed/absent titles', async () => {
     const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
     const agentCtxCalls: FakeAgentCtx[] = []
@@ -297,6 +363,52 @@ describe('ZealDriver', () => {
     const result = await assembleListener({}, {}, async () => ({ variables: {} })) as { variables: { provider: string; model: string } }
     expect(result.variables.provider).toBe('other-provider')
     expect(result.variables.model).toBe('glm-6')
+  })
+
+  it('(IMPORTANT-2a) switchModel clears any reasoningEffort carried on the previous selection', async () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    const agentCtxCalls: FakeAgentCtx[] = []
+    const selectionWithEffort = { provider: 'zai', model: 'glm-5.2', reasoningEffort: 'high' } as unknown as ModelSelection
+    const { agents } = fakeAgents(new FakeSession('s1', [], 0), agentCtxCalls)
+    const ctx = fakeCtx({ agents, agentDefaultModel: fakeDefaultModel(selectionWithEffort) })
+
+    const driver = await ZealDriver.start(ctx, store, {})
+    const agentCtx = agentCtxCalls[0]!
+    const assembleListener = agentCtx.calls.find(c => c.name === 'system-prompt/assemble')!.listener
+    const requestListener = agentCtx.calls.find(c => c.name === 'agent/request')!.listener
+
+    // Baseline: the initial selection's effort flows through to the
+    // resolved request config before any switch.
+    await assembleListener({}, {}, async () => ({ variables: {} }))
+    const before = await requestListener({}, async () => ({ provider: 'old', model: 'old', reasoningEffort: 'high' })) as Record<string, unknown>
+    expect(before['reasoningEffort']).toBe('high')
+
+    driver.switchModel('glm-6')
+
+    // installModelSelection's `agent/request` handler only clears an
+    // inherited effort when the SELECTED (assembled) selection omits the
+    // key entirely — re-fire assemble so `selection.assembled` reflects the
+    // post-switch selection, then request again.
+    await assembleListener({}, {}, async () => ({ variables: {} }))
+    const after = await requestListener({}, async () => ({ provider: 'old', model: 'old', reasoningEffort: 'high' })) as Record<string, unknown>
+    expect('reasoningEffort' in after).toBe(false)
+  })
+
+  it('(IMPORTANT-2b) an unchanged selection keeps its reasoningEffort across requests', async () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    const agentCtxCalls: FakeAgentCtx[] = []
+    const selectionWithEffort = { provider: 'zai', model: 'glm-5.2', reasoningEffort: 'high' } as unknown as ModelSelection
+    const { agents } = fakeAgents(new FakeSession('s1', [], 0), agentCtxCalls)
+    const ctx = fakeCtx({ agents, agentDefaultModel: fakeDefaultModel(selectionWithEffort) })
+
+    await ZealDriver.start(ctx, store, {})
+    const agentCtx = agentCtxCalls[0]!
+    const assembleListener = agentCtx.calls.find(c => c.name === 'system-prompt/assemble')!.listener
+    const requestListener = agentCtx.calls.find(c => c.name === 'agent/request')!.listener
+
+    await assembleListener({}, {}, async () => ({ variables: {} }))
+    const result = await requestListener({}, async () => ({ provider: 'old', model: 'old' })) as Record<string, unknown>
+    expect(result['reasoningEffort']).toBe('high')
   })
 
   it('flush calls ctx.sessions.flush with the live agent session', async () => {
