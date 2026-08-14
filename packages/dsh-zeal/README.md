@@ -7,6 +7,8 @@ it's installed into a `dsh` profile (by the [`@zealagent/zeal`](../zeal/README.m
 launcher, or manually — see the [root README](../../README.md)) and composed
 by `dsh` itself.
 
+Requires Node.js >= 22 (this package's `package.json` `engines` field).
+
 ```sh
 dsh plugin --profile zeal add @zealagent/dsh-zeal @deepseek-ai/dsh-code-runtime-worker-thread
 dsh --profile zeal

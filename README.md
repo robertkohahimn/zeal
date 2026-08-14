@@ -20,13 +20,19 @@ all `dsh`. Zeal is the TUI, a composition patch, a launcher, and tests.
 
 ## Quickstart
 
+**Requirements:** Node.js >= 22 (both packages' `engines` field); [pnpm](https://pnpm.io)
+only if you're building from source instead of running via `npx` — see
+[Development](#development) below.
+
 ```sh
 npx @zealagent/zeal
 ```
 
-On first run this bootstraps a `zeal` `dsh` profile (installs the
-`@zealagent/dsh-zeal` bundle plus `@deepseek-ai/dsh-code-runtime-worker-thread`
-into it), then launches. Every run after that is equivalent to:
+On first run this bootstraps a `zeal` `dsh` profile under `$DSH_HOME`
+(defaults to `~/.dsh`; override with the `DSH_HOME` environment variable) —
+installing the `@zealagent/dsh-zeal` bundle plus
+`@deepseek-ai/dsh-code-runtime-worker-thread` into it — then launches. Every
+run after that is equivalent to:
 
 ```sh
 dsh --profile zeal
@@ -58,9 +64,6 @@ owner-only, hot-reloaded `$DSH_HOME/.credentials.yaml` file — keys are never
 read from `cordis.patch.yml` or `settings.yaml`, and never written to logs.
 If the first request fails with a missing-credential error, the TUI shows an
 onboarding panel naming the exact variable to set instead of a raw error.
-
-`$DSH_HOME` defaults to `~/.dsh` (override with the `DSH_HOME` environment
-variable).
 
 ## Manual install
 
@@ -248,6 +251,10 @@ through whatever credential is in your environment untouched.)
 task (G1–G8) with date, model, bundle/`dsh` versions, outcome, and notes on
 how each result was produced or mechanically verified. It's both the
 project's quality bar and its persona-tuning log.
+
+As of this writing, every row in `GAUNTLET.md` is recorded **PENDING** — no
+live `ZAI_API_KEY` was available during development; see `GAUNTLET.md`'s own
+per-row notes for how each task was verified mechanically in its absence.
 
 ## Packages
 

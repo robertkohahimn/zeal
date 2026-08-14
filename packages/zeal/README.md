@@ -6,6 +6,8 @@ runs — see the [root README](../../README.md) for the full user-facing
 quickstart, key setup, and configuration flows. This document covers what
 the launcher itself does.
 
+Requires Node.js >= 22 (this package's `package.json` `engines` field).
+
 ```sh
 npx @zealagent/zeal
 ```
