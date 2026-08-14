@@ -1,0 +1,5 @@
+This repository's src/ directory has eight pipeline-stage files
+(stageA.ts through stageH.ts), each implementing one stage of a small
+order-processing pipeline. Summarize every one of the eight files (what it
+does, what it exports), then find and fix the one failing test in
+src/pipeline.test.ts. Run the tests to confirm they pass.

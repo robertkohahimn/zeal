@@ -1,0 +1,24 @@
+# G7 overlay extension — appended by gauntlet/run.sh's step 4b onto the
+# profile's cordis.patch.yml, AFTER the shared gauntlet/overlay.cordis.yml.
+# Retargets llm-pi-ai again (spec A11: per-route model reshape), giving the
+# zai route's glm-5.2 a small contextWindow so summarizing this task's eight
+# ~200-line files triggers compaction cheaply, without needing a huge
+# fixture to exhaust a full-size context window.
+#
+# A patch REPLACES the targeted row's whole config, so this restates the
+# COMPLETE llm-pi-ai row verbatim from packages/dsh-zeal/cordis.patch.yml's
+# own base row (both providers, their apiKeyEnv and reasoning values) —
+# omitting zai-coding-cn here would silently drop it, not just leave it
+# unchanged.
+- id: llm-pi-ai
+  config:
+    providers:
+      zai:
+        apiKeyEnv: ZAI_API_KEY
+        reasoning: high
+        models:
+          - id: glm-5.2
+            contextWindow: 16384
+      zai-coding-cn:
+        apiKeyEnv: ZHIPU_API_KEY
+        reasoning: high
