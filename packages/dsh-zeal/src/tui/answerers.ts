@@ -40,12 +40,24 @@
  * `'allow-once' | 'reject'`, mapped 1:1 onto `'allowed-once'`/`'rejected'`;
  * a store-side abort (the promise REJECTS — see `store.ts`'s
  * `enqueueInteraction`/`removeInteraction`) is caught and mapped to
- * `'cancelled'`. That catch is required, not defensive dressing:
+ * `'cancelled'` — but ONLY when `req.signal?.aborted` is actually `true` at
+ * catch time. That catch is required, not defensive dressing:
  * `ApprovalService.request`'s waterfall dispatch (lib/index.js:189) funnels
  * ANY rejection from the waterfall — ours included — through
  * `.then(_, () => 'unavailable')`, so an uncaught rejection here would
  * surface as the wrong outcome (fail-closed, but the WRONG fail-closed
- * value) instead of the brief's required `'cancelled'`.
+ * value) instead of the brief's required `'cancelled'`. The `aborted` gate
+ * matters symmetrically: today `store.askApproval`'s promise can ONLY ever
+ * reject via this request's own abort (`store.ts` has no other reject
+ * path), but that is an implementation detail of `store.ts`, not a
+ * contract this module should assume holds forever. A hypothetical future
+ * store rejection unrelated to abort (a genuine bug) must NOT be
+ * mislabeled `'cancelled'` — "the user cancelled" and "something broke"
+ * are different facts an operator needs to tell apart. Gating on
+ * `req.signal?.aborted` and rethrowing otherwise preserves fail-closed
+ * behavior either way: a genuine non-abort rejection still propagates out
+ * of this listener and still ends up fail-closed, just correctly labeled
+ * `'unavailable'` by the seam's own catch-all instead of `'cancelled'`.
  *
  * `ctx.userQuestions.registerProvider(provider)` — dsh-user-questions
  * lib/types/index.d.ts:46: `(provider: UserQuestionProvider) => () =>
@@ -185,8 +197,8 @@ export function mapAnswers(items: QuestionItem[], answers: QuestionAnswer[]): As
 /**
  * Register Zeal's global approval answerer and question provider on `ctx`.
  * Call once per bundle context — see the module doc for the exact seam
- * contracts this wires together, and for why the approval listener must
- * catch (not propagate) a store-side abort.
+ * contracts this wires together, and for why the approval listener catches
+ * an abort-caused store rejection but rethrows any other one.
  * @param ctx - the bundle's root context (carries the `'approval/request'`
  *   event and `ctx.userQuestions`).
  * @param store - the TUI's transcript store, which owns the actual
@@ -204,7 +216,15 @@ export function registerZealAnswerers(ctx: Context, store: ZealStore): void {
         req.signal,
       )
       .then((decision): ApprovalOutcome => (decision === 'allow-once' ? 'allowed-once' : 'rejected'))
-      .catch((): ApprovalOutcome => 'cancelled')
+      .catch((reason: unknown): ApprovalOutcome => {
+        // Only a rejection this request's OWN abort actually caused maps to
+        // 'cancelled' (see module doc). Anything else is an unexpected
+        // failure and must propagate unmapped, so the seam's own waterfall
+        // catch-all (lib/index.js:189) — not this listener — labels it
+        // 'unavailable' rather than the wrong-but-fail-closed 'cancelled'.
+        if (req.signal?.aborted) return 'cancelled'
+        throw reason
+      })
   })
 
   ctx.userQuestions.registerProvider({

@@ -243,6 +243,37 @@ describe('registerZealAnswerers', () => {
     await expect(pending).resolves.toBe('cancelled')
   })
 
+  it('approval: a store rejection while the request signal is present but NOT aborted propagates unmapped (not mislabeled "cancelled")', async () => {
+    // A hand-rolled fake store — the real ZealStore can only reject
+    // askApproval via this exact request's own abort (store.ts has no
+    // other reject path today), so exercising "some other rejection cause"
+    // needs a fake that can reject for an unrelated reason.
+    const failure = new Error('boom: unrelated store failure')
+    const fakeStore = { askApproval: () => Promise.reject(failure) } as unknown as ZealStore
+    const ctx = new FakeCtx()
+    registerZealAnswerers(ctx as unknown as Context, fakeStore)
+
+    const controller = new AbortController() // present, but never aborted
+    const req: ApprovalRequest = { agent: fakeAgent('agent-1'), toolName: 'bash', signal: controller.signal }
+
+    // The real seam's own waterfall catch-all would map an uncaught
+    // rejection here to 'unavailable' (lib/index.js:189) — this test
+    // observes the rejection directly at the fake-ctx boundary, which is
+    // sufficient to prove the listener does NOT swallow it into 'cancelled'.
+    await expect(ctx.approvalListener!(req, stubNext)).rejects.toBe(failure)
+  })
+
+  it('approval: a store rejection with no request signal at all also propagates unmapped', async () => {
+    const failure = new Error('boom: unrelated store failure')
+    const fakeStore = { askApproval: () => Promise.reject(failure) } as unknown as ZealStore
+    const ctx = new FakeCtx()
+    registerZealAnswerers(ctx as unknown as Context, fakeStore)
+
+    const req: ApprovalRequest = { agent: fakeAgent('agent-1'), toolName: 'bash' }
+
+    await expect(ctx.approvalListener!(req, stubNext)).rejects.toBe(failure)
+  })
+
   it('questions: request.questions is mapped via mapQuestions into the queued QuestionsPrompt, and the resolved answers are mapped back via mapAnswers', async () => {
     const { store, ctx } = setup()
     const request: AskUserQuestionRequest = {
