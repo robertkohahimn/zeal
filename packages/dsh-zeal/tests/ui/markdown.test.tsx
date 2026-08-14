@@ -105,4 +105,43 @@ describe('Markdown', () => {
       expect(line.startsWith('│ ')).toBe(true)
     }
   })
+
+  // Re-review follow-up on finding 1: a table nested inside a blockquote
+  // hits extractPlainText's `table` special-case via `blockquoteLines`, not
+  // `renderTable` (that richer path only recurses from top-level
+  // renderBlock). Confirm the nested path is also leak-free: cell content
+  // appears, flattened into the blockquote's plain-text line (no rule/
+  // column alignment at this nesting level — documented residual
+  // simplification), and no raw `|`/`---` markup survives.
+  it('renders a table nested inside a blockquote without leaking raw markdown syntax', () => {
+    const source = '> | Name | Age |\n> | --- | --- |\n> | Alice | 30 |'
+    const { lastFrame } = render(<Markdown width={40} source={source} />)
+    const frame = lastFrame()!
+    expect(frame).toContain('Name')
+    expect(frame).toContain('Age')
+    expect(frame).toContain('Alice')
+    expect(frame).toContain('30')
+    expect(frame).not.toContain('|')
+    expect(frame).not.toContain('---')
+    // Still blockquote-prefixed.
+    for (const line of frame.split('\n').filter((line) => line.length > 0)) {
+      expect(line.startsWith('│ ')).toBe(true)
+    }
+  })
+
+  // Re-review follow-up on finding 1: a table nested inside a list item
+  // hits extractPlainText's `table` special-case via `splitListItemTokens`'s
+  // fallback branch. Confirm the nested path is also leak-free.
+  it('renders a table nested inside a list item without leaking raw markdown syntax', () => {
+    const source = '- item one\n\n  | Name | Age |\n  | --- | --- |\n  | Bob | 25 |'
+    const { lastFrame } = render(<Markdown width={40} source={source} />)
+    const frame = lastFrame()!
+    expect(frame).toContain('item one')
+    expect(frame).toContain('Name')
+    expect(frame).toContain('Age')
+    expect(frame).toContain('Bob')
+    expect(frame).toContain('25')
+    expect(frame).not.toContain('|')
+    expect(frame).not.toContain('---')
+  })
 })
