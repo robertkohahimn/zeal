@@ -13,7 +13,9 @@
     "./package.json": "./package.json"
   },
   "files": ["lib", "cordis.patch.yml"],
-  "scripts": { "build": "tsdown src/startup.ts src/gauntlet-runner.ts src/tui/index.ts --dts --format esm --out-dir lib" },
+  "scripts": {
+    "build": "tsdown src/startup.ts src/gauntlet-runner.ts src/tui/index.ts --dts --format esm --out-dir lib --unbundle && node scripts/assert-dts-exports.mjs"
+  },
   "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
   "dependencies": {
     "@deepseek-ai/cordis": "4.0.1",
