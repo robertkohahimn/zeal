@@ -119,6 +119,52 @@ describe('ZealStore fold semantics', () => {
     expect(store.getState().settled).toEqual([{ kind: 'notice', seq: 2, level: 'info', text: 'turn interrupted' }])
   })
 
+  // I5 (Ruling R4): an assistant-message carrying usage updates
+  // status.contextFill using the CURRENT model's window from MODEL_WINDOWS.
+  it('assistant-message with usage updates status.contextFill using the current model\'s context window', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' }) // 1,000,000-token window
+    store.apply(fixtures.assistantMessage('answer', '', 1, { inputTokens: 400_000, outputTokens: 100_000 }))
+    expect(store.getState().status.contextFill).toBeCloseTo(0.5)
+  })
+
+  it('assistant-message without usage leaves contextFill untouched (undefined by default)', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    store.apply(fixtures.assistantMessage('answer', '', 1))
+    expect(store.getState().status.contextFill).toBeUndefined()
+  })
+
+  it('assistant-message without usage does not clear a previously-set contextFill', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    store.apply(fixtures.assistantMessage('first', '', 1, { inputTokens: 500_000, outputTokens: 0 }))
+    expect(store.getState().status.contextFill).toBeCloseTo(0.5)
+    store.apply(fixtures.assistantMessage('second, no usage', '', 2))
+    expect(store.getState().status.contextFill).toBeCloseTo(0.5)
+  })
+
+  it('contextFill reflects only the LATEST usage, not a cumulative sum across turns', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' }) // 1,000,000-token window
+    store.apply(fixtures.assistantMessage('first', '', 1, { inputTokens: 100_000, outputTokens: 0 }))
+    expect(store.getState().status.contextFill).toBeCloseTo(0.1)
+    store.apply(fixtures.assistantMessage('second', '', 2, { inputTokens: 300_000, outputTokens: 0 }))
+    // 0.3, not 0.4 — a cumulative sum would double-count shared history.
+    expect(store.getState().status.contextFill).toBeCloseTo(0.3)
+  })
+
+  it('an unrecognized model id falls back to DEFAULT_MODEL_WINDOW for contextFill', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'some-future-model' })
+    store.apply(fixtures.assistantMessage('answer', '', 1, { inputTokens: 100_000, outputTokens: 0 }))
+    expect(store.getState().status.contextFill).toBeCloseTo(0.5) // 100k / 200k default window
+  })
+
+  // I6b (final-review fix wave, Ruling R5): compaction/end folds into a
+  // notice in settled, same as any other notice.
+  it('compaction/end folds into an info notice in settled', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    store.apply(fixtures.turnStart(1))
+    store.apply(fixtures.compactionEnd(2))
+    expect(store.getState().settled).toEqual([{ kind: 'notice', seq: 2, level: 'info', text: 'context compacted' }])
+  })
+
   it('request-header updates status provider and model', () => {
     const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
     store.apply(fixtures.requestHeader('zai', 'glm-5.2-turbo', 1))
@@ -229,7 +275,23 @@ describe('ZealStore public API', () => {
     expect(store.getState()).toEqual({
       settled: [],
       status: { provider: 'zai-coding-cn', model: 'glm-4.7', running: false },
+      generation: 1,
     })
+  })
+
+  // C3 (final-review fix wave): `generation` starts at 0 on a fresh store
+  // and increments by exactly 1 per `reset()` call — the signal
+  // `Transcript.tsx` keys `<Static>` with to force a remount after a
+  // `/resume` restart. See `model.ts`'s and `store.ts`'s doc comments.
+  it('generation starts at 0 and increments by one per reset() call', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    expect(store.getState().generation).toBe(0)
+
+    store.reset({ provider: 'zai', model: 'glm-5.2' })
+    expect(store.getState().generation).toBe(1)
+
+    store.reset({ provider: 'zai', model: 'glm-5.2' })
+    expect(store.getState().generation).toBe(2)
   })
 
   // CRITICAL 1 (Task 14 review): the whole reason `reset()` exists — a

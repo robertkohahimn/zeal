@@ -26,7 +26,16 @@ import type {
 } from '@deepseek-ai/dsh-agent'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import { defaultLogPath, onboardingNotice, performQuit, resumeDriver } from '../src/tui/index.ts'
+import {
+  apply,
+  defaultLogPath,
+  isInteractiveTty,
+  NON_TTY_MESSAGE,
+  onboardingNotice,
+  performQuit,
+  resumeDriver,
+  wireDriverObservers,
+} from '../src/tui/index.ts'
 import { ZealDriver } from '../src/tui/driver.ts'
 import { ZealStore } from '../src/tui/store.ts'
 import { fixtures } from './fixtures/events.ts'
@@ -174,6 +183,33 @@ describe('performQuit', () => {
     )
     expect(order).toEqual(['unmount', 'interrupt', 'flush', 'restoreStdio', 'appExit'])
   })
+
+  // M9 (final-review fix wave): `unmount()` now runs INSIDE the try/finally,
+  // not before it — a throwing `unmount()` must still restore stdio and call
+  // appExit(0), the same guarantee IMPORTANT 2 already gives `flush()`.
+  it('(M9) a throwing unmount() still restores stdio and calls appExit(0)', async () => {
+    const order: string[] = []
+    const driver: FakeQuitDriver = {
+      interrupt: () => order.push('interrupt'),
+      flush: async () => { order.push('flush') },
+      agent: { whenIdle: async () => { order.push('whenIdle') } },
+    }
+    const restoreCalls: number[] = []
+    const appExitCalls: number[] = []
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    await performQuit({
+      unmount: () => { throw new Error('unmount boom') },
+      driver,
+      restoreStdio: () => restoreCalls.push(1),
+      appExit: (code) => appExitCalls.push(code),
+    })
+    expect(restoreCalls).toEqual([1])
+    expect(appExitCalls).toEqual([0])
+    // interrupt/whenIdle/flush never ran — unmount threw before reaching them.
+    expect(order).toEqual([])
+    expect(consoleError).toHaveBeenCalled()
+    consoleError.mockRestore()
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -318,5 +354,166 @@ describe('resumeDriver (assembly-level; CRITICAL 1 regression)', () => {
 
     await expect(stalePrompt).rejects.toThrow('ZealStore was reset')
     expect(store.getState().interaction).toBeUndefined()
+  })
+
+  // I4 (final-review fix wave): the ordering fix's whole point. Pre-fix,
+  // `resumeDriver` disposed the retiring driver and reset the store BEFORE
+  // starting the replacement — a start() rejection then left the TUI wired
+  // to an already-disposed driver over an already-wiped transcript. Post-fix,
+  // a start() rejection must leave the retiring driver undisposed and the
+  // store's pre-existing transcript untouched.
+  it('(I4) a replacement start() rejection leaves the retiring driver undisposed and the store untouched', async () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    const firstSession = new FakeSession('first-session', [], 0)
+    const { agents, disposeCalls } = fakeAgents({ create: firstSession, resume: firstSession })
+    const failingResumeAgents = {
+      create: agents.create,
+      resume: async (): Promise<never> => { throw new Error('no such session: bad-id') },
+    }
+    const ctx = fakeCtx({ agents: failingResumeAgents })
+
+    const firstDriver = await ZealDriver.start(ctx, store, {})
+    store.apply(fixtures.userMessage('still here before the failed resume', 1))
+    expect(store.getState().settled).toHaveLength(1)
+
+    await expect(resumeDriver(ctx, store, firstDriver, 'bad-id', () => {})).rejects.toThrow('no such session: bad-id')
+
+    // The retiring driver was NEVER disposed...
+    expect(disposeCalls).toEqual([])
+    // ...and the store's generation/transcript were NEVER reset — the
+    // pre-existing session is left exactly as it was.
+    expect(store.getState().generation).toBe(0)
+    expect(store.getState().settled).toHaveLength(1)
+    expect(store.getState().settled[0]).toMatchObject({ text: 'still here before the failed resume' })
+  })
+
+  // I4, the success-path complement: once start() succeeds, the retiring
+  // driver IS disposed and the store's generation bumps exactly once (C3's
+  // signal for `Transcript.tsx` to remount `<Static>`).
+  it('(I4) a successful resume disposes the retiring driver exactly once and bumps store.generation', async () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    const firstSession = new FakeSession('first-session', [], 0)
+    const secondSession = new FakeSession('second-session', [fixtures.turnStart(0)], 1)
+    const { agents, disposeCalls } = fakeAgents({ create: firstSession, resume: secondSession })
+    const ctx = fakeCtx({ agents })
+
+    const firstDriver = await ZealDriver.start(ctx, store, {})
+    expect(store.getState().generation).toBe(0)
+
+    await resumeDriver(ctx, store, firstDriver, 'second-session', () => {})
+
+    expect(disposeCalls).toEqual(['create'])
+    expect(store.getState().generation).toBe(1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// I8 (final-review fix wave): `wireDriverObservers`'s optional
+// `sandboxPolicy`/`sessionTitle` reads must never be able to take down boot
+// or a `/resume` restart over what is purely a cosmetic status-bar read.
+// ---------------------------------------------------------------------------
+
+describe('wireDriverObservers (I8: guarded optional reads)', () => {
+  function fakeObservedDriver(): { driver: ZealDriver; agentCtx: FakeAgentCtx } {
+    const agentCtx = new FakeAgentCtx()
+    const driver = { agent: { session: { id: 'sess-1' }, ctx: agentCtx } } as unknown as ZealDriver
+    return { driver, agentCtx }
+  }
+
+  it('a rejecting sandboxPolicy.resolve() is caught: wireDriverObservers still resolves and never sets sandboxMode', async () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    const { driver } = fakeObservedDriver()
+    const ctx = {
+      get: (name: string) => (name === 'sandboxPolicy' ? { resolve: async () => { throw new Error('sandbox boom') } } : undefined),
+    } as unknown as Context
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    await expect(wireDriverObservers(ctx, store, driver)).resolves.toBeUndefined()
+    expect(store.getState().status.sandboxMode).toBeUndefined()
+    expect(consoleError).toHaveBeenCalled()
+    consoleError.mockRestore()
+  })
+
+  it('a throwing sessionTitle.get() inside the session/event listener is caught, not propagated to the emitter', async () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    const { driver, agentCtx } = fakeObservedDriver()
+    const ctx = {
+      get: (name: string) => (name === 'sessionTitle' ? { get: () => { throw new Error('title boom') } } : undefined),
+    } as unknown as Context
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    await wireDriverObservers(ctx, store, driver)
+    expect(() => agentCtx.fire('session/event', {}, fixtures.turnEnd('completed', 1))).not.toThrow()
+    expect(store.getState().status.title).toBeUndefined()
+    expect(consoleError).toHaveBeenCalled()
+    consoleError.mockRestore()
+  })
+
+  it('a healthy sandboxPolicy/sessionTitle pair still updates status normally (guard does not swallow success)', async () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    const { driver, agentCtx } = fakeObservedDriver()
+    const ctx = {
+      get: (name: string) => {
+        if (name === 'sandboxPolicy') return { resolve: async () => ({ mode: 'sandboxed' }) }
+        if (name === 'sessionTitle') return { get: () => ({ title: 'Fix the bug' }) }
+        return undefined
+      },
+    } as unknown as Context
+
+    await wireDriverObservers(ctx, store, driver)
+    expect(store.getState().status.sandboxMode).toBe('sandboxed')
+
+    agentCtx.fire('session/event', {}, fixtures.turnEnd('completed', 1))
+    expect(store.getState().status.title).toBe('Fix the bug')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// M11 (final-review fix wave): a piped/non-interactive invocation must print
+// a plain error and exit(1) instead of mounting Ink (which requires a real
+// TTY to put the terminal into raw mode).
+// ---------------------------------------------------------------------------
+
+describe('isInteractiveTty', () => {
+  it('is true only when both stdout and stdin report an interactive TTY', () => {
+    expect(isInteractiveTty({ stdout: { isTTY: true }, stdin: { isTTY: true } })).toBe(true)
+    expect(isInteractiveTty({ stdout: { isTTY: false }, stdin: { isTTY: true } })).toBe(false)
+    expect(isInteractiveTty({ stdout: { isTTY: true }, stdin: { isTTY: false } })).toBe(false)
+    expect(isInteractiveTty({ stdout: {}, stdin: {} })).toBe(false)
+  })
+})
+
+describe('apply (M11: non-TTY guard)', () => {
+  const originalStdoutIsTty = process.stdout.isTTY
+  const originalStdinIsTty = process.stdin.isTTY
+
+  afterEach(() => {
+    process.stdout.isTTY = originalStdoutIsTty
+    process.stdin.isTTY = originalStdinIsTty
+  })
+
+  it('a non-TTY stdout/stdin prints the plain error, calls ctx.appExit(1), and never mounts Ink', () => {
+    process.stdout.isTTY = false
+    process.stdin.isTTY = false
+    const appExitCalls: number[] = []
+    const ctx = { appExit: (code: number) => appExitCalls.push(code) } as unknown as Context
+    const stderrWrite = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+
+    apply(ctx, {})
+
+    expect(appExitCalls).toEqual([1])
+    expect(stderrWrite).toHaveBeenCalledWith(`${NON_TTY_MESSAGE}\n`)
+    stderrWrite.mockRestore()
+  })
+
+  it('tolerates ctx.appExit being undefined (mirrors QuitDeps\' optionality elsewhere)', () => {
+    process.stdout.isTTY = false
+    process.stdin.isTTY = true
+    const ctx = {} as unknown as Context
+    const stderrWrite = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+
+    expect(() => apply(ctx, {})).not.toThrow()
+    expect(stderrWrite).toHaveBeenCalledWith(`${NON_TTY_MESSAGE}\n`)
+    stderrWrite.mockRestore()
   })
 })

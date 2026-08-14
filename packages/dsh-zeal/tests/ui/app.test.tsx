@@ -325,6 +325,62 @@ describe('App', () => {
     expect(onResume).toHaveBeenCalledWith('sess-a')
   })
 
+  // I6a (final-review fix wave): while the input starts with '/', a dim hint
+  // line under the editor lists matching command names from
+  // `dispatcher.completions(currentLine)` — display only.
+  describe('slash-command autocomplete hint (I6a)', () => {
+    it('shows no hint before any "/" is typed', async () => {
+      const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+      const driver = fakeDriver()
+      const { stdin, lastFrame } = render(
+        <App store={store} driver={driver} dispatcher={buildDispatcher()} onQuit={vi.fn()} onResume={vi.fn()} />,
+      )
+      await press(stdin, 'hello')
+      await settle()
+      const frame = lastFrame()!
+      expect(frame).not.toContain('/help')
+      expect(frame).not.toContain('/model')
+    })
+
+    it('shows a dim hint listing matching command names while the line starts with "/"', async () => {
+      const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+      const driver = fakeDriver()
+      const { stdin, lastFrame } = render(
+        <App store={store} driver={driver} dispatcher={buildDispatcher()} onQuit={vi.fn()} onResume={vi.fn()} />,
+      )
+      // Of the four fakeLocals (help, quit, model, resume), only "help"
+      // starts with "h" — an unambiguous single-match assertion.
+      await press(stdin, '/h')
+      await settle()
+      expect(lastFrame()!).toContain('/help')
+
+      // The hint disappears again once the line no longer starts with '/'
+      // (e.g. the command is submitted and the buffer clears).
+      await press(stdin, '\r')
+      await settle()
+      expect(lastFrame()!).not.toContain('/help')
+    })
+
+    it('caps the hint at 6 matching command names', async () => {
+      const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+      const driver = fakeDriver()
+      const manyLocals: LocalCommand[] = Array.from({ length: 8 }, (_, i) => ({
+        name: `cmd${i + 1}`,
+        description: `Command ${i + 1}`,
+        run: async () => undefined,
+      }))
+      const dispatcher = new CommandDispatcher({ locals: manyLocals })
+      const { stdin, lastFrame } = render(
+        <App store={store} driver={driver} dispatcher={dispatcher} onQuit={vi.fn()} onResume={vi.fn()} />,
+      )
+      await press(stdin, '/c')
+      const frame = lastFrame()!
+      for (let i = 1; i <= 6; i++) expect(frame).toContain(`/cmd${i}`)
+      expect(frame).not.toContain('/cmd7')
+      expect(frame).not.toContain('/cmd8')
+    })
+  })
+
   // IMPORTANT 5: Esc must not call `interrupt()` on a driver mid-resume —
   // the `driver` reference during that window is the OLD one, about to be
   // disposed by `index.ts`'s `resumeDriver`.

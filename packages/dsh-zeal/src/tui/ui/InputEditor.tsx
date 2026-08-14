@@ -108,6 +108,15 @@
  * also correctly handles the (rare) case of two genuine submits landing in
  * the same batch: both are queued and flushed in order, none dropped or
  * duplicated.
+ *
+ * `onChange` (I6a, final-review fix wave): reports the full current buffer
+ * (`editor.lines.join('\n')`) after every commit via a plain dependency-array
+ * `useEffect` — NOT from inside the `dispatch` updater, which the "Same-tick
+ * bursts" section above documents must stay pure (Strict Mode double-invokes
+ * it). `App.tsx` uses this to drive the slash-command autocomplete hint line:
+ * it needs to see uncommitted, still-being-typed text (`dispatcher.
+ * completions(currentLine)`), which `onSubmit` alone — firing only once a
+ * line is actually submitted — cannot provide.
  * @module @zealagent/dsh-zeal/tui/ui/InputEditor
  */
 import { Box, Text, useInput, usePaste } from 'ink'
@@ -119,6 +128,14 @@ import type { EditorAction, EditorState } from '../editor.ts'
 export interface InputEditorProps {
   /** Called once per submitted line, in order, whenever `return` (and not `alt+return`) is pressed. */
   onSubmit: (text: string) => void
+  /**
+   * Called with the full current buffer (`lines.join('\n')`) after every
+   * commit where it changed — including the initial mount, with whatever
+   * `history`-seeded or empty value that starts as. See the module doc
+   * comment ("`onChange`") for why `App.tsx` needs this in addition to
+   * `onSubmit`.
+   */
+  onChange?: (text: string) => void
   /** Optional seed history (e.g. restored from a prior session), oldest first. */
   history?: string[]
   /**
@@ -143,9 +160,18 @@ function initialUiState(history?: string[]): UiState {
 type DispatchInput = EditorAction | ((prev: EditorState) => EditorAction)
 
 export function InputEditor(props: InputEditorProps): JSX.Element {
-  const { onSubmit, history, isActive = true } = props
+  const { onSubmit, onChange, history, isActive = true } = props
   const [ui, setUi] = useState<UiState>(() => initialUiState(history))
   const flushedCountRef = useRef(0)
+
+  // I6a: report the current buffer to `onChange` after every commit where it
+  // changed — see the module doc comment ("`onChange`") for why this is a
+  // plain effect rather than a call from inside the `dispatch` updater above.
+  const currentText = ui.editor.lines.join('\n')
+  useEffect(() => {
+    onChange?.(currentText)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentText])
 
   const dispatch = (input: DispatchInput): void => {
     setUi((prev) => {

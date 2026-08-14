@@ -73,8 +73,16 @@ export const fixtures = {
   /**
    * `assistant/message` — content mixes 'text' and 'reasoning' blocks
    * (dsh-llm types.d.ts:25-33); both are folded out separately downstream.
+   * `usage` (I5 / Ruling R4) mirrors `TokenUsage` (dsh-llm types.d.ts:109-115)
+   * — omitted entirely (not even an `undefined` key) when not passed, matching
+   * "`usage` is absent when the adapter reported none".
    */
-  assistantMessage(text: string, reasoning: string, seq: number): SessionEvent {
+  assistantMessage(
+    text: string,
+    reasoning: string,
+    seq: number,
+    usage?: { inputTokens: number; outputTokens: number; cacheReadTokens?: number; cacheWriteTokens?: number; reasoningTokens?: number },
+  ): SessionEvent {
     return envelope('assistant/message', seq, {
       turn: 1,
       step: 1,
@@ -87,6 +95,7 @@ export const fixtures = {
         ],
         source: { kind: 'model', provider: 'zhipu', model: 'glm-4.7' },
       },
+      ...(usage !== undefined ? { usage } : {}),
     })
   },
 
@@ -160,5 +169,16 @@ export const fixtures = {
   /** An event type outside the transcribed vocabulary — must fall through to `other`. */
   unknown(seq: number): SessionEvent {
     return envelope('some/future-event', seq, {})
+  },
+
+  /**
+   * `compaction/end` (I6b) — see `normalize.ts`'s local `SessionEventMap`
+   * augmentation note for why this key isn't part of the pinned
+   * `@deepseek-ai/dsh-session@0.0.1-rc.1`'s own declared vocabulary.
+   * `normalizeEvent` reads none of the payload's fields, so this fixture's
+   * payload is an arbitrary placeholder object.
+   */
+  compactionEnd(seq: number): SessionEvent {
+    return envelope('compaction/end', seq, { turn: 1 })
   },
 }

@@ -20,6 +20,23 @@
  * argument is the absolute, collision-free index into the full items array
  * (see `ink@7.1.1`'s `Static.js`), so the key combines it with `kind`+`seq`
  * for readability while staying unique.
+ *
+ * `<Static key={state.generation}>` (C3, final-review fix wave): `<Static>`
+ * keeps its OWN internal index into the `items` array across renders,
+ * tracking how many it has already flushed to the terminal — it never
+ * re-renders an item once flushed, by design (that's the whole performance
+ * point). `ZealStore.reset()` (the `/resume` restart path, `store.ts`)
+ * replaces `settled` with a brand-new, typically much SHORTER array (a
+ * resumed session's own seed), which `<Static>` can misread as the same
+ * array having merely shrunk — its stale index then points past the new
+ * array's end, and the resumed session's seed silently never renders, non-
+ * deterministically depending on exactly when the store's 16ms notify
+ * coalescer fires relative to the reset. `state.generation` (bumped by every
+ * `reset()`, see `model.ts`'s doc comment) as the `key` forces React to
+ * unmount the old `<Static>` and mount a fresh one on every reset, which
+ * resets that internal index to zero along with it — the new instance
+ * treats the whole `settled` array as unflushed and renders it from
+ * scratch, exactly the seed-replay behavior a `/resume` restart needs.
  * @module @zealagent/dsh-zeal/tui/ui/Transcript
  */
 import { Box, Static, Text } from 'ink'
@@ -36,7 +53,7 @@ export function Transcript(props: { state: ZealViewState; width: number }): JSX.
   const safeWidth = Math.max(1, width)
   return (
     <Box flexDirection="column" width={safeWidth}>
-      <Static items={[...state.settled]}>
+      <Static key={state.generation} items={[...state.settled]}>
         {(entry, index) => (
           <SettledEntryView key={`${entry.kind}-${entry.seq}-${index}`} entry={entry} width={safeWidth} />
         )}

@@ -14,6 +14,7 @@ describe('Transcript', () => {
         { kind: 'assistant', seq: 2, text: 'Hi! How can I help?', reasoning: '' },
       ],
       status,
+      generation: 0,
     }
     const { lastFrame } = render(<Transcript state={state} width={80} />)
     const frame = lastFrame()!
@@ -33,6 +34,7 @@ describe('Transcript', () => {
         tools: [{ kind: 'tool', seq: 1, callId: 'c1', name: 'bash', args: '{"cmd":"ls"}', status: 'running', preview: '' }],
       },
       status,
+      generation: 0,
     }
     const { lastFrame } = render(<Transcript state={state} width={80} />)
     const frame = lastFrame()!
@@ -56,6 +58,7 @@ describe('Transcript', () => {
         },
       ],
       status,
+      generation: 0,
     }
     const { lastFrame } = render(<Transcript state={state} width={80} />)
     const frame = lastFrame()!
@@ -80,6 +83,7 @@ describe('Transcript', () => {
         },
       ],
       status,
+      generation: 0,
     }
     const { lastFrame } = render(<Transcript state={state} width={80} />)
     const frame = lastFrame()!
@@ -113,6 +117,7 @@ describe('Transcript', () => {
         },
       ],
       status,
+      generation: 0,
     }
     const { lastFrame } = render(<Transcript state={state} width={80} />)
     const lines = lastFrame()!.split('\n')
@@ -139,6 +144,7 @@ describe('Transcript', () => {
         },
       ],
       status,
+      generation: 0,
     }
     const { lastFrame } = render(<Transcript state={state} width={80} />)
     const lines = lastFrame()!.split('\n')
@@ -153,6 +159,7 @@ describe('Transcript', () => {
       settled: [],
       live: { text: 'Final streaming answer', reasoning: 'thinking it through', tools: [] },
       status,
+      generation: 0,
     }
     const { lastFrame } = render(<Transcript state={state} width={80} />)
     const frame = lastFrame()!
@@ -178,6 +185,7 @@ describe('Transcript', () => {
           { kind: 'notice', seq: 5, level: 'error', text: 'turn aborted' },
         ],
         status,
+        generation: 0,
       }
       const { lastFrame } = render(<Transcript state={state} width={80} />)
       const frame = lastFrame()!
@@ -206,6 +214,7 @@ describe('Transcript', () => {
       settled: [{ kind: 'user', seq: 1, text: 'First settled message' }],
       live: { text: 'partial streaming answer', reasoning: '', tools: [] },
       status,
+      generation: 0,
     }
     const { lastFrame, rerender } = render(<Transcript state={state1} width={80} />)
     expect(lastFrame()).toContain('First settled message')
@@ -218,6 +227,7 @@ describe('Transcript', () => {
       ],
       live: { text: 'next turn starting', reasoning: '', tools: [] },
       status,
+      generation: 0,
     }
     rerender(<Transcript state={state2} width={80} />)
     const frame = lastFrame()!
@@ -232,5 +242,48 @@ describe('Transcript', () => {
     const liveIndex = frame.indexOf('next turn starting')
     expect(secondIndex).toBeGreaterThan(firstIndex)
     expect(liveIndex).toBeGreaterThan(secondIndex)
+  })
+
+  // C3 (final-review fix wave): Ink's <Static> keeps its own internal index
+  // into the `items` array it was last given, tracking how many it has
+  // already flushed. `store.reset()` (the `/resume` restart path) replaces
+  // `settled` with a BRAND NEW, unrelated, and typically much shorter array
+  // — from `<Static>`'s perspective this looks like "the same items array,
+  // just shrunk", so its internal index can end up pointing PAST the end of
+  // the new array, silently skipping the resumed session's seed entirely
+  // (nondeterministically, depending on exactly when the 16ms store-notify
+  // coalescer fires relative to the reset). Keying `<Static>` with
+  // `state.generation` (bumped by every `reset()`) forces React to unmount
+  // and remount a fresh `<Static>` instance whenever generation changes,
+  // discarding that stale internal index. Reproduce the exact shape: 3
+  // settled entries at generation 0, then rerender with 1 DIFFERENT settled
+  // entry at generation 1 (simulating a post-reset seed replay) — the new
+  // entry's content must appear, and appear exactly once.
+  it('remounts <Static> on a generation bump so a post-reset seed is not skipped', () => {
+    const preResetState: ZealViewState = {
+      settled: [
+        { kind: 'user', seq: 1, text: 'pre-reset message one' },
+        { kind: 'assistant', seq: 2, text: 'pre-reset message two', reasoning: '' },
+        { kind: 'notice', seq: 3, level: 'info', text: 'pre-reset message three' },
+      ],
+      status,
+      generation: 0,
+    }
+    const { lastFrame, rerender } = render(<Transcript state={preResetState} width={80} />)
+    expect(lastFrame()).toContain('pre-reset message one')
+
+    // Post-`reset()`: an entirely different, much shorter settled array,
+    // stamped with the bumped generation — exactly what `resumeDriver`'s
+    // `store.reset()` + resumed-session seed replay produces.
+    const postResetState: ZealViewState = {
+      settled: [{ kind: 'user', seq: 1, text: 'resumed session seed message' }],
+      status,
+      generation: 1,
+    }
+    rerender(<Transcript state={postResetState} width={80} />)
+    const frame = lastFrame()!
+
+    const occurrences = (haystack: string, needle: string) => haystack.split(needle).length - 1
+    expect(occurrences(frame, 'resumed session seed message')).toBe(1)
   })
 })

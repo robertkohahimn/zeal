@@ -55,6 +55,15 @@
  * flow through `dispatcher.dispatch()` like any other command and their
  * `uiText` renders as an ordinary notice.
  *
+ * Slash-command autocomplete hint (I6a, final-review fix wave): while the
+ * current input buffer starts with `/`, a dim one-line hint renders directly
+ * below the editor listing up to 6 matching command names from `dispatcher.
+ * completions(currentLine)` — DISPLAY ONLY, no tab-cycling or selection (spec
+ * §3.4's "slash-command autocomplete menu" is explicitly narrowed to this in
+ * §8's amendment; see that file). `currentLine` is tracked via `InputEditor`'s
+ * `onChange` prop (its own module doc explains why a plain `useEffect` there,
+ * not `onSubmit`, is the right signal for this).
+ *
  * Interaction-pending / picker-open editor inertness (carry-forward 1):
  * `InputEditor` stays MOUNTED the whole time (never conditionally
  * unmounted) so a partially-typed draft survives an approval prompt that
@@ -98,6 +107,8 @@ const CTRL_C_QUIT_WINDOW_MS = 1500
 const CTRL_C_HINT = 'press ctrl+c again to quit'
 /** Fallback width when the host terminal reports none (matches `Transcript`/`StatusBar`'s own `Math.max(1, …)` guards). */
 const DEFAULT_WIDTH = 80
+/** Cap on how many matching command names the autocomplete hint line shows at once (I6a). */
+const AUTOCOMPLETE_MAX = 6
 
 /**
  * Structural subset of `ZealDriver` (`driver.ts`) this component calls. See
@@ -149,6 +160,9 @@ export function App(props: AppProps): JSX.Element {
   const [dispatcher, setDispatcher] = useState<CommandDispatcher>(props.dispatcher)
   const [picker, setPicker] = useState<PickerState | undefined>(undefined)
   const [ctrlCHint, setCtrlCHint] = useState(false)
+  // I6a: the uncommitted input buffer, mirrored from `InputEditor`'s
+  // `onChange` — drives the autocomplete hint line below the editor.
+  const [currentLine, setCurrentLine] = useState('')
   // Mirrors `resumingRef` below for rendering (editor inertness, `<Box
   // display>`) — see IMPORTANT 5's fix note on why the ref, not this state,
   // is the actual re-entry guard.
@@ -275,6 +289,10 @@ export function App(props: AppProps): JSX.Element {
   // trade-off over widening `StatusBar`.
   const displayStatus: StatusModel = ctrlCHint ? { ...state.status, retry: CTRL_C_HINT } : state.status
 
+  // I6a: up to AUTOCOMPLETE_MAX matching command names, display only — no
+  // tab-cycling or selection (see the module doc comment).
+  const completions = currentLine.startsWith('/') ? dispatcher.completions(currentLine).slice(0, AUTOCOMPLETE_MAX) : []
+
   return (
     <Box flexDirection="column">
       <Transcript state={state} width={width} />
@@ -288,8 +306,9 @@ export function App(props: AppProps): JSX.Element {
           onCancel={() => setPicker(undefined)}
         />
       )}
-      <Box display={editorInert ? 'none' : 'flex'}>
-        <InputEditor onSubmit={handleSubmit} isActive={!editorInert} />
+      <Box display={editorInert ? 'none' : 'flex'} flexDirection="column">
+        <InputEditor onSubmit={handleSubmit} onChange={setCurrentLine} isActive={!editorInert} />
+        {completions.length > 0 && <Text dimColor>{completions.join('  ')}</Text>}
       </Box>
       <StatusBar status={displayStatus} width={width} />
     </Box>

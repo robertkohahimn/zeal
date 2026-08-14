@@ -79,4 +79,15 @@ export interface ZealViewState {
   live?: LiveTurn
   status: StatusModel
   interaction?: PendingInteraction
+  /**
+   * Bumped by every `ZealStore.reset()` call (final-review fix C3). `reset()`
+   * replaces `settled` with a brand-new, typically much shorter array (a
+   * `/resume` restart's fresh session), which Ink's `<Static>` — tracking its
+   * own internal "how many items already flushed" index across renders —
+   * can misread as the same array having merely shrunk, silently skipping
+   * the resumed session's seed. `Transcript.tsx` keys `<Static>` with this
+   * field so a generation bump forces React to unmount and remount it,
+   * discarding that stale index. Starts at `0` on a fresh store.
+   */
+  generation: number
 }

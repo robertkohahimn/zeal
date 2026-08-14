@@ -175,11 +175,21 @@ function buildDispatcher(ctx: Context, driver: ZealDriver, onQuit: () => void): 
  * @param store - the transcript store notices/status land on.
  * @param driver - the live driver whose agent's `session/event` firehose is observed.
  */
-async function wireDriverObservers(ctx: Context, store: ZealStore, driver: ZealDriver): Promise<void> {
+export async function wireDriverObservers(ctx: Context, store: ZealStore, driver: ZealDriver): Promise<void> {
   const session = driver.agent.session
   const sandboxPolicy = ctx.get('sandboxPolicy') as { resolve?: (req: { session: unknown }) => { mode?: string } } | undefined
-  const policy = await sandboxPolicy?.resolve?.({ session })
-  if (policy?.mode !== undefined) store.setStatus({ sandboxMode: policy.mode })
+  // I8 fix (final-review fix wave): this is a purely cosmetic status-bar
+  // read. `wireDriverObservers` runs inside `bootZealTui`'s outer try/catch
+  // (initial boot) and inside `resumeDriver` (a `/resume` restart) — left
+  // unguarded, a rejecting/throwing optional service here would be
+  // indistinguishable from a genuine boot/resume failure and abort the
+  // whole TUI over nothing worse than a missing sandbox-mode label.
+  try {
+    const policy = await sandboxPolicy?.resolve?.({ session })
+    if (policy?.mode !== undefined) store.setStatus({ sandboxMode: policy.mode })
+  } catch (err) {
+    console.error('zeal-tui: sandboxPolicy.resolve() failed (ignored — status-bar cosmetic only):', err)
+  }
 
   driver.agent.ctx.on('session/event', (_session: unknown, event: SessionEvent) => {
     const zealEvent = normalizeEvent(event)
@@ -189,9 +199,18 @@ async function wireDriverObservers(ctx: Context, store: ZealStore, driver: ZealD
       store.addNotice('error', onboardingNotice(store.getState().status.provider))
     }
 
-    const sessionTitle = ctx.get('sessionTitle') as { get?: (s: unknown) => { title?: string } | undefined } | undefined
-    const snapshot = sessionTitle?.get?.(session)
-    if (snapshot?.title !== undefined) store.setStatus({ title: snapshot.title })
+    // I8 fix: same reasoning as above. A `session/event` listener that
+    // throws can break the emitting call site's own control flow (an
+    // ordinary `EventEmitter` does not isolate listener exceptions) — a
+    // throwing `sessionTitle.get()` must never be allowed to do that over a
+    // purely cosmetic status-bar read.
+    try {
+      const sessionTitle = ctx.get('sessionTitle') as { get?: (s: unknown) => { title?: string } | undefined } | undefined
+      const snapshot = sessionTitle?.get?.(session)
+      if (snapshot?.title !== undefined) store.setStatus({ title: snapshot.title })
+    } catch (err) {
+      console.error('zeal-tui: sessionTitle.get() failed (ignored — status-bar cosmetic only):', err)
+    }
   })
 }
 
@@ -202,21 +221,49 @@ async function wireDriverObservers(ctx: Context, store: ZealStore, driver: ZealD
  * the fidelity level `tests/driver.test.ts` already exercises `ZealDriver`
  * at.
  *
- * CRITICAL fix (Task 14 review): `store.reset(...)` MUST run before
- * `ZealDriver.start()`, not after and not skipped. `store` is REUSED across
- * a restart (so `App`'s existing `useSyncExternalStore` subscription keeps
- * working), but a resumed session has its own independent `seq` counter
- * starting back at 0 — without resetting, `ZealStore.apply`'s `seq <=
- * lastSeq` guard would silently drop the resumed session's replayed seed
- * (and any live event below the retiring session's high-water mark),
- * because it looks identical to stale replay of already-applied events.
- * See `store.ts`'s `reset()` doc for the full mechanics.
+ * ORDERING (I4 fix, final-review fix wave — supersedes the Task 14 review's
+ * original CRITICAL fix, which had the retiring driver disposed and the
+ * store reset BEFORE the replacement `ZealDriver.start()`): if that
+ * replacement `start()` rejects (e.g. `/resume` of a session id that no
+ * longer exists), disposing/resetting first left the TUI wired to an
+ * already-disposed driver over an already-wiped transcript — a start
+ * FAILURE destroyed the still-working session. The chosen order here:
+ *
+ *   1. `ZealDriver.start()` the REPLACEMENT first, touching neither the
+ *      retiring driver nor `store`'s reset state. If this rejects,
+ *      `resumeDriver` simply rejects too — the retiring driver is never
+ *      disposed and `store` is never reset, so the TUI is left exactly as
+ *      it was (`App.tsx`'s `performResume` catch renders the rejection as
+ *      an error notice over the still-intact, still-live session).
+ *   2. Only once `start()` has SUCCEEDED: dispose the retiring driver, then
+ *      `store.reset(...)` (bumping `state.generation` — see `store.ts`'s and
+ *      `model.ts`'s doc comments for why `Transcript.tsx` needs that to
+ *      remount `<Static>` correctly here).
+ *   3. Re-apply the resumed session's full event log — `driver.agent.
+ *      session.events` — into the now-reset `store`.
+ *
+ * Why step 3 is necessary despite `ZealDriver.start()` already having fed
+ * the same seed (and any live events from its own await window) into
+ * `store` once during step 1: at that point `store.lastSeq` was still the
+ * RETIRING session's high-water mark, and the resumed session's seed has its
+ * own independent, typically much LOWER `seq` counter — `ZealStore.apply`'s
+ * `seq <= lastSeq` guard silently drops it as indistinguishable from stale
+ * replay (the exact CRITICAL-1 failure mode the original fix targeted).
+ * That is fine and expected here, not a bug: whatever transiently happened
+ * to `store` during step 1 is unconditionally wiped by step 2's `reset()`
+ * moments later. Step 3 re-applies from `driver.agent.session.events` —
+ * which, being the session's own append-only log, already reflects BOTH the
+ * original seed AND any live events that arrived during step 1's await
+ * window — against the freshly reset guard (`lastSeq` back to `-1`), so this
+ * single replay recovers exactly the correct state with nothing missing and
+ * nothing duplicated.
  * @param ctx - the plugin context.
  * @param store - the ONE store instance reused across the restart.
- * @param retiringDriver - the driver being replaced; disposed before the replacement starts.
+ * @param retiringDriver - the driver being replaced; disposed only after the replacement successfully starts.
  * @param sessionId - the persisted session id to resume.
  * @param onQuit - forwarded into the fresh dispatcher's `/quit` local.
  * @returns the fresh driver and dispatcher `App`/`bootZealTui` swap in.
+ * @throws whatever `ZealDriver.start()` throws — the retiring driver and `store` are left untouched in that case (see the ordering note above).
  */
 export async function resumeDriver(
   ctx: Context,
@@ -225,15 +272,27 @@ export async function resumeDriver(
   sessionId: string,
   onQuit: () => void,
 ): Promise<{ driver: ZealDriver; dispatcher: CommandDispatcher }> {
+  // Step 1: start the replacement FIRST. A rejection here propagates
+  // straight out of `resumeDriver` without touching `retiringDriver` or
+  // `store` at all — see the ordering note above.
+  const driver = await ZealDriver.start(ctx, store, { resumeSessionId: sessionId })
+
+  // Step 2: only now, with the replacement live, retire the old driver and
+  // reset the store for the new session.
   await retiringDriver.dispose()
   const defaultSelection = ctx.agentDefaultModel.currentSelection()
-  // Reset BEFORE start(): see the CRITICAL fix note above. `defaultSelection`
-  // is a reasonable initial status for the resumed session — the first
-  // `request/header` event (or, on this same tick, `ZealDriver.start`'s
-  // model-selection setup) will correct it if the resumed session actually
-  // used a different route/model.
+  // `defaultSelection` is a reasonable initial status for the resumed
+  // session — the first `request/header` event in the replay below (or a
+  // later live one) corrects it if the resumed session actually used a
+  // different route/model.
   store.reset({ provider: defaultSelection.provider, model: defaultSelection.model })
-  const driver = await ZealDriver.start(ctx, store, { resumeSessionId: sessionId })
+
+  // Step 3: re-apply the resumed session's full event log against the
+  // now-reset guard — see the ordering note above for why this (not the
+  // apply attempt already made inside step 1's `ZealDriver.start()`) is the
+  // replay that actually lands.
+  for (const event of driver.agent.session.events) store.apply(event)
+
   const dispatcher = buildDispatcher(ctx, driver, onQuit)
   await wireDriverObservers(ctx, store, driver)
   return { driver, dispatcher }
@@ -313,12 +372,20 @@ export interface QuitDeps {
  * wait now run before `flush()`, so the durable session log reflects a
  * settled turn boundary rather than whatever was mid-flight when the user
  * quit.
+ *
+ * M9 fix (final-review fix wave): `deps.unmount()` now runs INSIDE the same
+ * try/finally as `interrupt`/`whenIdle`/`flush`, not before it. Previously a
+ * throwing `unmount()` (Ink's own teardown is not guaranteed exception-free)
+ * would throw straight out of `performQuit` before the `finally` block ever
+ * ran, leaving `restoreStdio()`/`appExit` uncalled — stdio stuck redirected
+ * and no exit requested, the exact stuck-mid-quit failure mode IMPORTANT 2
+ * already fixed for `flush()`/`whenIdle()`, just not yet for `unmount()`.
  * @param deps - the driver and lifecycle callbacks this sequence drives.
  * @param quiesceTimeoutMs - override for `QUIESCE_TIMEOUT_MS` (tests only).
  */
 export async function performQuit(deps: QuitDeps, quiesceTimeoutMs: number = QUIESCE_TIMEOUT_MS): Promise<void> {
-  deps.unmount()
   try {
+    deps.unmount()
     deps.driver.interrupt()
     await withTimeout(deps.driver.agent.whenIdle(), quiesceTimeoutMs)
     await deps.driver.flush()
@@ -330,13 +397,47 @@ export async function performQuit(deps: QuitDeps, quiesceTimeoutMs: number = QUI
   }
 }
 
+/** The exact plain-text message M11 (final-review fix wave) specifies for a non-TTY boot attempt. */
+export const NON_TTY_MESSAGE = 'zeal requires an interactive terminal (TTY)'
+
+/**
+ * M11 boot precondition: Ink puts the terminal into raw mode to own
+ * keyboard input (spec §3.5), which requires a REAL interactive TTY on both
+ * `stdin` and `stdout`. A piped/non-interactive invocation (CI, a script, a
+ * redirected `dsh --profile zeal < input.txt`) cannot be made to work — Ink's
+ * own raw-mode setup would fail deep inside `render()` with a much less
+ * legible error, or hang. Parameterized over the streams (rather than
+ * reading `process.stdout`/`process.stdin` directly) so tests can exercise
+ * both outcomes without touching this process's real stdio.
+ * @param streams - `isTTY` from `process.stdout`/`process.stdin`.
+ * @returns `true` only when both streams report an interactive TTY.
+ */
+export function isInteractiveTty(streams: { stdout: { isTTY?: boolean }; stdin: { isTTY?: boolean } }): boolean {
+  return Boolean(streams.stdout.isTTY) && Boolean(streams.stdin.isTTY)
+}
+
 /**
  * The plugin entry point. Kicks off the async boot sequence and returns
  * immediately — Cordis plugin `apply()` is synchronous by contract, and the
  * boot work (loader await, agent creation, Ink mount) is all inherently
  * asynchronous.
+ *
+ * M11 fix: the TTY check runs FIRST, before `redirectDiagnostics` runs at
+ * all — this is the "restore stdio first if already redirected" concern
+ * satisfied by construction rather than by an extra runtime call: writing
+ * `NON_TTY_MESSAGE` to the real `process.stderr` only reaches the terminal
+ * before `redirectDiagnostics` patches `process.stderr.write` to append to
+ * the diagnostics log file instead — after that patch, the very message
+ * meant to explain the failure to the user would silently vanish into a log
+ * file nobody is looking at. Ordering the check first means there is never
+ * anything to restore.
  */
 export function apply(ctx: Context, config: Config): void {
+  if (!isInteractiveTty({ stdout: process.stdout, stdin: process.stdin })) {
+    process.stderr.write(`${NON_TTY_MESSAGE}\n`)
+    ctx.appExit?.(1)
+    return
+  }
   const logPath = config.logFile ?? defaultLogPath()
   const restoreStdio = redirectDiagnostics(logPath)
   void bootZealTui(ctx, restoreStdio)

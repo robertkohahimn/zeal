@@ -41,6 +41,36 @@ describe('normalizeEvent', () => {
       .toEqual({ t: 'assistant-message', seq: 3, text: 'the answer', reasoning: 'let me think' })
   })
 
+  // I5 (Ruling R4): usage folds into totalTokens = the three disjoint
+  // "billed input" counts (inputTokens + cacheReadTokens + cacheWriteTokens)
+  // plus this request's outputTokens.
+  it('maps assistant/message usage into totalTokens (I5, Ruling R4)', () => {
+    const r = normalizeEvent(fixtures.assistantMessage('answer', 'thinking', 5, {
+      inputTokens: 100,
+      outputTokens: 50,
+      cacheReadTokens: 10,
+      cacheWriteTokens: 5,
+    }))
+    expect(r).toEqual({
+      t: 'assistant-message',
+      seq: 5,
+      text: 'answer',
+      reasoning: 'thinking',
+      totalTokens: 165,
+    })
+  })
+
+  it('omits totalTokens from assistant/message entirely when the raw event carries no usage', () => {
+    const r = normalizeEvent(fixtures.assistantMessage('answer', '', 5))
+    expect(r).toEqual({ t: 'assistant-message', seq: 5, text: 'answer', reasoning: '' })
+    expect('totalTokens' in r).toBe(false)
+  })
+
+  it('omits absent optional cache fields from the totalTokens sum (treated as 0)', () => {
+    const r = normalizeEvent(fixtures.assistantMessage('answer', '', 6, { inputTokens: 200, outputTokens: 20 }))
+    expect(r).toMatchObject({ totalTokens: 220 })
+  })
+
   it('maps a failing tool/result to ok: false and previews the content', () => {
     const r = normalizeEvent(fixtures.toolResult('call_2', true, 'boom', 14))
     expect(r).toEqual({ t: 'tool-result', seq: 14, callId: 'call_2', ok: false, preview: 'boom' })
@@ -69,6 +99,13 @@ describe('normalizeEvent', () => {
   it('maps an error turn/end with its error code and message', () => {
     expect(normalizeEvent(fixtures.turnEndError('RATE_LIMIT', 'too many requests', 19)))
       .toEqual({ t: 'turn-end', seq: 19, outcome: 'error', errorCode: 'RATE_LIMIT', errorMessage: 'too many requests' })
+  })
+
+  // I6b (final-review fix wave, Ruling R5): a completed compaction cycle
+  // folds into a fixed info notice, regardless of payload content.
+  it('maps compaction/end to a fixed info notice', () => {
+    expect(normalizeEvent(fixtures.compactionEnd(20)))
+      .toEqual({ t: 'notice', seq: 20, level: 'info', text: 'context compacted' })
   })
 })
 

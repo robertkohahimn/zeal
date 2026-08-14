@@ -26,6 +26,7 @@
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ZealEvent } from './normalize.ts'
 import { normalizeEvent } from './normalize.ts'
+import { contextWindowFor } from './model-windows.ts'
 import type {
   ApprovalDecision,
   ApprovalPrompt,
@@ -92,6 +93,7 @@ export class ZealStore {
     this.state = {
       settled: [],
       status: { provider: initialStatus.provider, model: initialStatus.model, running: false },
+      generation: 0,
     }
   }
 
@@ -156,6 +158,15 @@ export class ZealStore {
    * than silently dropped, so a caller still awaiting
    * `askApproval`/`askQuestions` observes a definite outcome instead of
    * hanging forever.
+   *
+   * C3 fix (final-review fix wave): bumps `state.generation`. Ink's
+   * `<Static>` (`Transcript.tsx`) tracks its own internal "how many items
+   * already flushed" index across renders — replacing `settled` with a
+   * brand-new, typically much shorter array (exactly what happens here) can
+   * misread as the same array having shrunk, silently skipping the resumed
+   * session's seed under the store's 16ms notify coalescer. `Transcript.tsx`
+   * keys `<Static>` with `generation` so React remounts it fresh on every
+   * `reset()`, discarding that stale index — see `model.ts`'s doc comment.
    * @param initialStatus - the fresh provider/model to seed `status` with — any
    *   stale `title`/`sandboxMode`/`retry`/`contextFill` from the retiring
    *   session is deliberately dropped, not carried over.
@@ -169,6 +180,7 @@ export class ZealStore {
     this.state = {
       settled: [],
       status: { provider: initialStatus.provider, model: initialStatus.model, running: false },
+      generation: this.state.generation + 1,
     }
     this.scheduleNotify()
   }
@@ -338,9 +350,20 @@ export class ZealStore {
         const entry: AssistantEntry = { kind: 'assistant', seq: e.seq, text: e.text, reasoning: e.reasoning }
         const settled = [...this.state.settled, entry]
         const live = this.state.live
+        // I5 (Ruling R4): fold the LATEST `totalTokens` figure, never a
+        // running sum across turns — see `normalize.ts`'s `ZealEvent` doc
+        // comment for why the latest value alone already approximates
+        // current context occupancy for an ordinary (non-cached-history)
+        // chat request. Absent `totalTokens` (no `usage` on the raw event)
+        // leaves any prior `contextFill` untouched rather than clearing it —
+        // a later request without usage data is not evidence the context
+        // shrank.
+        const status = e.totalTokens !== undefined
+          ? { ...this.state.status, contextFill: e.totalTokens / contextWindowFor(this.state.status.model) }
+          : this.state.status
         this.state = live
-          ? { ...this.state, settled, live: { ...live, text: '', reasoning: '' } }
-          : { ...this.state, settled }
+          ? { ...this.state, settled, status, live: { ...live, text: '', reasoning: '' } }
+          : { ...this.state, settled, status }
         return
       }
 
@@ -368,6 +391,14 @@ export class ZealStore {
 
       case 'request-header': {
         this.setStatus({ provider: e.provider, model: e.model })
+        return
+      }
+
+      // I6b (final-review fix wave): a normalized notice event (currently
+      // only `compaction/end` — see `normalize.ts`) folds straight into
+      // `settled`, exactly like `addNotice`'s own notices.
+      case 'notice': {
+        this.state = { ...this.state, settled: [...this.state.settled, this.notice(e.seq, e.level, e.text)] }
         return
       }
 

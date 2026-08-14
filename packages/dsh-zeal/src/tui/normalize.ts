@@ -36,7 +36,15 @@
  *   - 'assistant/message': `{ turn, step, message: AssistantMessage, usage?
  *     }` (line 259-264). `AssistantMessage.content: ContentBlock[]`
  *     (message.d.ts:135-138) mixes `'text'` and `'reasoning'` blocks
- *     (dsh-llm types.d.ts:25-33).
+ *     (dsh-llm types.d.ts:25-33). `usage?: TokenUsage` (dsh-llm
+ *     types.d.ts:109-115): `{ inputTokens: number, outputTokens: number,
+ *     cacheReadTokens?: number, cacheWriteTokens?: number, reasoningTokens?:
+ *     number }` — "Token accounting for ONE model call" (that type's own doc
+ *     comment), disjoint counts ("billed input = sum of the three" —
+ *     `inputTokens` + `cacheReadTokens` + `cacheWriteTokens`), absent when
+ *     the adapter reported none. This is PER-REQUEST, not a running session
+ *     total — see I5/Ruling R4's note on `ZealEvent`'s `totalTokens` below
+ *     for how that shapes the contextFill fold in `store.ts`.
  *   - 'tool/call': `{ turn, step, callId: CallId, name: string, arguments:
  *     string }` (line 270-276). NOTE the raw field is `arguments` (the raw
  *     JSON exactly as the model produced it), not `args` — `ZealEvent.args`
@@ -69,17 +77,63 @@
 
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 
-/** Flat event vocabulary every downstream Zeal consumer reads exclusively. */
+/**
+ * LOCAL AUGMENTATION (I6b, final-review fix wave): `dsh-zeal` does not
+ * depend on `@deepseek-ai/dsh-compaction-basic` directly — it is composed in
+ * transitively by the base bundle at runtime (`cordis.patch.yml`), so the
+ * merge-extensible `SessionEventMap` this file transcribes from (see the
+ * module doc above) has no declaration for the `'compaction/end'` key
+ * anywhere in this package's own type graph. Event type name transcribed
+ * from `gauntlet/tasks/g7-compaction/verify.sh`'s own citation of
+ * `$DSH_SRC/packages/compaction/compaction-basic/src/region.ts`: automatic
+ * compaction appends `session.append('compaction/start', lifecycle)`, then
+ * on success (or failure — a failure path additionally appends an `error`
+ * field) `session.append('compaction/end', lifecycle)`. `normalizeEvent`
+ * below reads NONE of that payload's fields — every `compaction/end` folds
+ * into the same fixed info notice regardless of content — so this
+ * augmentation declares the minimal shape actually needed: none.
+ */
+declare module '@deepseek-ai/dsh-session' {
+  interface SessionEventMap {
+    'compaction/end': Record<string, unknown>
+  }
+}
+
+/**
+ * I5 (Ruling R4): `assistant-message`'s optional `totalTokens` is derived
+ * from the raw event's `usage?: TokenUsage` (see the module doc's
+ * transcription) as `inputTokens + cacheReadTokens + cacheWriteTokens +
+ * outputTokens` — the three disjoint "billed input" counts plus this
+ * request's output, i.e. the full size of THIS ONE request (prompt +
+ * completion), not a running sum across the session. `TokenUsage` is
+ * explicitly per-model-call, and for an ordinary (non-cached-history) chat
+ * API a later request's `inputTokens` already includes the entire prior
+ * conversation resent as context — so the LATEST `assistant-message`'s
+ * `totalTokens` already approximates current context occupancy on its own;
+ * summing it across turns would double- (or triple-, or...) count the
+ * shared history and overstate `contextFill`. `store.ts`'s fold reflects
+ * this: it keeps only the latest value, never a running total. Absent
+ * (`undefined`) exactly when the raw event carried no `usage` at all.
+ */
 export type ZealEvent =
   | { t: 'turn-start'; seq: number }
   | { t: 'text-delta'; seq: number; text: string }
   | { t: 'reasoning-delta'; seq: number; text: string }
   | { t: 'user-message'; seq: number; text: string }
-  | { t: 'assistant-message'; seq: number; text: string; reasoning: string }
+  | { t: 'assistant-message'; seq: number; text: string; reasoning: string; totalTokens?: number }
   | { t: 'tool-call'; seq: number; callId: string; name: string; args: string }
   | { t: 'tool-result'; seq: number; callId: string; ok: boolean; preview: string }
   | { t: 'request-header'; seq: number; provider: string; model: string }
   | { t: 'turn-end'; seq: number; outcome: 'completed' | 'aborted' | 'error'; errorCode?: string; errorMessage?: string }
+  /**
+   * A store-fold-ready notice normalized directly out of a raw session
+   * event — currently only `'compaction/end'` (I6b, final-review fix wave;
+   * see the local `SessionEventMap` augmentation above). Distinct from
+   * `turn-end`'s own inline error/aborted notices (those stay inline since
+   * they piggyback on a turn boundary already being folded); this variant
+   * is for a raw event whose ENTIRE normalized meaning is "show this notice".
+   */
+  | { t: 'notice'; seq: number; level: 'info' | 'error'; text: string }
   | { t: 'other'; seq: number }
 
 /** Tool-result previews are truncated here so a giant command output cannot blow up the TUI's render buffer. */
@@ -160,13 +214,20 @@ export function normalizeEvent(event: SessionEvent): ZealEvent {
     case 'user/message':
       return { t: 'user-message', seq, text: textOf(event.data.content) }
 
-    case 'assistant/message':
-      return {
-        t: 'assistant-message',
+    case 'assistant/message': {
+      const base = {
+        t: 'assistant-message' as const,
         seq,
         text: textOf(event.data.message.content),
         reasoning: reasoningOf(event.data.message.content),
       }
+      const usage = event.data.usage
+      if (usage === undefined) return base
+      // See the `ZealEvent` doc comment above for why this is the sum of
+      // THIS request's disjoint token counts, not a running session total.
+      const totalTokens = usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0) + usage.outputTokens
+      return { ...base, totalTokens }
+    }
 
     case 'tool/call':
       return { t: 'tool-call', seq, callId: event.data.callId, name: event.data.name, args: event.data.arguments }
@@ -197,6 +258,14 @@ export function normalizeEvent(event: SessionEvent): ZealEvent {
       }
       return { t: 'turn-end', seq, outcome: outcomeOf(reason.kind) }
     }
+
+    // I6b (final-review fix wave): a completed (or failed — see the local
+    // `SessionEventMap` augmentation note above) compaction cycle is worth
+    // telling the user about, so a whole context-shrinking rewrite of the
+    // transcript doesn't pass by silently. Kept as a fixed message
+    // regardless of payload content, per this task's brief.
+    case 'compaction/end':
+      return { t: 'notice', seq, level: 'info', text: 'context compacted' }
 
     default:
       return { t: 'other', seq }
