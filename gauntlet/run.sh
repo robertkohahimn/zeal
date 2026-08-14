@@ -24,6 +24,12 @@
 # packing (mirrors packages/dsh-zeal/tests/composition/helpers.ts's own
 # ZEAL_SKIP_BUILD escape hatch) — set it when the caller already built the
 # bundle and wants to avoid a redundant rebuild.
+#
+# Per-task customization: a task directory may optionally carry
+# overlay.extra.cordis.yml and/or an executable setup.sh to extend the
+# shared overlay beyond what gauntlet/overlay.cordis.yml provides (e.g. G5's
+# extra MCP-client plugin, G7's extra llm-pi-ai retarget) — see step 4b
+# below for the full mechanism and ordering.
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
@@ -100,6 +106,57 @@ cp "$OVERLAY_FILE" "$DSH_HOME_DIR/profiles/zeal/cordis.patch.yml"
 # --- 4. Copy the task's repo/ into the scratch workdir ---------------------
 cp -R "$TASK_REPO_DIR"/. "$WORKDIR"/
 
+# --- 4b. Optional per-task customization hooks ------------------------------
+# Some gauntlet tasks need more than the shared overlay: G5 (MCP) must add a
+# whole extra plugin to the profile AND compute a path that only exists once
+# WORKDIR is populated (step 4, above); G7 (compaction) needs to restate a
+# whole extra cordis row (a full llm-pi-ai retarget) that has no runtime-
+# computed values and can just be appended verbatim. Two independent,
+# optional hooks cover both shapes — a task uses either, both, or neither:
+#
+#   gauntlet/tasks/<name>/overlay.extra.cordis.yml
+#     Optional. If present, its bytes are appended verbatim onto the
+#     profile's own cordis.patch.yml (step 3's copy of gauntlet/
+#     overlay.cordis.yml), AFTER the shared overlay's rows — same
+#     "restate the whole row" patch semantics the shared overlay's own
+#     comments document (packages/dsh-zeal/tests/patch.test.ts's `Row` shape:
+#     a flat list of `{ id?, name?, disabled?, config?, insert?: Row[] }`
+#     rows; multiple independent `insert:` rows in one file are valid — see
+#     that test's `rows.flatMap(r => r.insert ?? [])`). Static content only:
+#     nothing in this file can reference $WORKDIR/$DSH_HOME, since it is
+#     copied byte-for-byte before either is known to the task author.
+#
+#   gauntlet/tasks/<name>/setup.sh
+#     Optional, must be executable. Run after step 4 (so $WORKDIR already
+#     holds the task's repo/ fixture and any path inside it can be resolved
+#     to an absolute path) and before the task runs. Receives DSH_HOME,
+#     WORKDIR, TASK_DIR, REPO_ROOT, and DSH_VERSION exported in its
+#     environment — the same values this script computed above, so a hook
+#     can install additional plugins into the profile (mirroring step 2's
+#     own `dsh plugin --profile zeal add` invocation via `pnpm dlx`) and/or
+#     append a cordis row it had to generate at run time (e.g. one embedding
+#     an absolute $WORKDIR path) directly onto
+#     "$DSH_HOME/profiles/zeal/cordis.patch.yml". G5 uses this for exactly
+#     that: `dsh plugin --profile zeal add @deepseek-ai/dsh-mcp-client` (spec
+#     §4.5's doc-flow rehearsal), then appends an `insert:` row wiring that
+#     plugin to G5's own repo/mcp-server.mjs by absolute path.
+#
+# Order: overlay.extra.cordis.yml (if any) is appended first, then setup.sh
+# (if any) runs — so a setup.sh hook's own appends land after the static
+# extra overlay's rows and can override rows the extra overlay set, if a
+# task ever needs both. No shipped task currently uses both hooks at once.
+OVERLAY_EXTRA="$TASK_DIR/overlay.extra.cordis.yml"
+if [[ -f "$OVERLAY_EXTRA" ]]; then
+  echo "gauntlet/run.sh: appending per-task overlay extension ($OVERLAY_EXTRA)..."
+  cat "$OVERLAY_EXTRA" >> "$DSH_HOME_DIR/profiles/zeal/cordis.patch.yml"
+fi
+
+SETUP_HOOK="$TASK_DIR/setup.sh"
+if [[ -x "$SETUP_HOOK" ]]; then
+  echo "gauntlet/run.sh: running per-task setup hook ($SETUP_HOOK)..."
+  DSH_HOME="$DSH_HOME_DIR" WORKDIR="$WORKDIR" TASK_DIR="$TASK_DIR" REPO_ROOT="$REPO_ROOT" DSH_VERSION="$DSH_VERSION" "$SETUP_HOOK"
+fi
+
 # --- 5. Run the task, unattended, through zeal-gauntlet-runner -------------
 ZEAL_TASK="$(cat "$TASK_FILE")"
 echo "gauntlet/run.sh: running task..."
@@ -110,8 +167,12 @@ set -e
 echo "gauntlet/run.sh: dsh run exited $dsh_exit (diagnostic only — verify.sh decides pass/fail)"
 
 # --- 6. Verify ---------------------------------------------------------------
+# DSH_HOME is exported alongside WORKDIR so a task's verify.sh can grep the
+# scratch session store (e.g. G3/G4/G7's session-event checks against
+# "$DSH_HOME/sessions" — stored uncompressed per the shared overlay's
+# session-persistence-jsonl override, see gauntlet/overlay.cordis.yml).
 set +e
-WORKDIR="$WORKDIR" "$VERIFY_FILE"
+WORKDIR="$WORKDIR" DSH_HOME="$DSH_HOME_DIR" "$VERIFY_FILE"
 verify_exit=$?
 set -e
 
