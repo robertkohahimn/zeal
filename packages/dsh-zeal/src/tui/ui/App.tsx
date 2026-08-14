@@ -1,0 +1,302 @@
+/**
+ * The Zeal TUI's root component: composes `Transcript`/`InteractionPanel`/
+ * `InputEditor`/`StatusBar` over one `ZealStore`, routes submitted lines to
+ * either the driver (ordinary chat turn) or the `CommandDispatcher` (a
+ * `/`-prefixed line), and owns the two pieces of state no lower component
+ * can: global keyboard shortcuts (Esc, double-Ctrl+C) and the `/resume`
+ * session picker.
+ *
+ * PROPS CORRECTION against this task's brief sketch (`{ store: ZealStore;
+ * driver: ZealDriver; dispatcher: CommandDispatcher; onQuit(): void }`):
+ *
+ *   - `driver` is typed as the structural `AppDriver` below, not the
+ *     concrete `ZealDriver` class. `ZealDriver`'s constructor is PRIVATE
+ *     (`driver.ts`: "Construct with the static `start` factory... never
+ *     directly"), and a class with private members can only be satisfied by
+ *     an actual instance of that class — never by a plain object literal —
+ *     so a literal `driver: ZealDriver` prop type would force every frame
+ *     test to stand up a real `ZealDriver.start(...)` call (a full fake
+ *     `ctx.agents`/`ctx.agentDefaultModel`, mirroring `tests/driver.test.ts`)
+ *     just to test submit-routing. `AppDriver` names exactly the four
+ *     methods this component calls (`send`/`interrupt`/`switchModel`/
+ *     `listSessions`); a real `ZealDriver` instance structurally satisfies
+ *     it with zero adaptation (narrowing a real object to a smaller
+ *     structural type is always sound), while tests construct a plain fake.
+ *     Same pattern `commands.ts`'s `CommandSeam` already established for
+ *     `ctx.commands`.
+ *   - `dispatcher: CommandDispatcher` is unchanged — `CommandDispatcher`'s
+ *     constructor is public (`new CommandDispatcher({ seam, agent, locals
+ *     })`), so tests construct real instances directly, exactly like
+ *     `tests/commands.test.ts` does. No structural stand-in needed.
+ *   - `onResume(sessionId): Promise<{ driver; dispatcher }>` is an ADDED
+ *     prop the brief's terse sketch didn't spell out but its own prose
+ *     requires: "`/resume` → render picker … selection restarts the driver
+ *     via a callback prop". Restarting means disposing the retiring
+ *     `ZealDriver` (carry-forward 3's `dispose()`) and calling
+ *     `ZealDriver.start` again with `{ resumeSessionId }` — both of which
+ *     need `ctx`, which only `index.ts` (the plugin `apply()`) has. This
+ *     component cannot own that; it only owns the picker UI and the local
+ *     `driver`/`dispatcher` state slots the swap lands in. A fresh
+ *     `CommandDispatcher` comes back alongside the fresh driver because the
+ *     dispatcher's local commands (`/model` in particular) close over the
+ *     driver they operate on — reusing the old dispatcher after a resume
+ *     would silently operate on the disposed driver.
+ *
+ * Submit routing (per the brief): a `/`-prefixed line either matches one of
+ * the four driver-local commands (`/model`, `/resume`, `/help`, `/quit` —
+ * `commands.ts`'s module doc) or falls through to `dispatcher.dispatch()`,
+ * which itself checks locals before the `ctx.commands` seam. `/resume` is
+ * the one local command this component intercepts BEFORE dispatch, for the
+ * same reason `onResume` is a separate prop: opening the picker is
+ * rendering React UI, something a `LocalCommand.run(): Promise<string |
+ * undefined>` has no channel to do. `/model`/`/quit`/`/help` need no
+ * App-level interception — `index.ts` builds their `LocalCommand.run()`
+ * bodies closing directly over the driver/quit-callback they act on, so they
+ * flow through `dispatcher.dispatch()` like any other command and their
+ * `uiText` renders as an ordinary notice.
+ *
+ * Interaction-pending / picker-open editor inertness (carry-forward 1):
+ * `InputEditor` stays MOUNTED the whole time (never conditionally
+ * unmounted) so a partially-typed draft survives an approval prompt that
+ * interrupts mid-type. It is made inert two ways at once, per the
+ * carry-forward's "use it (isActive) and/or conditional mounting": `isActive`
+ * stops its `useInput`/`usePaste` listeners from consuming keystrokes, and a
+ * wrapping `<Box display="none">` (Ink 7's yoga-backed `display` prop) hides
+ * it from the rendered frame without unmounting it — `display: none` alone
+ * would NOT stop its keyboard listeners (Ink's `useInput` isActive is the
+ * only thing that does), which is why both are used together.
+ * @module @zealagent/dsh-zeal/tui/ui/App
+ */
+import { Box, Text, useInput, useWindowSize } from 'ink'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import type { JSX } from 'react'
+import { useSyncExternalStore } from 'react'
+import type { CommandDispatcher } from '../commands.ts'
+import type { PickerRow } from '../driver.ts'
+import type { ApprovalDecision, QuestionAnswer, StatusModel } from '../model.ts'
+import type { ZealStore } from '../store.ts'
+import { InputEditor } from './InputEditor.tsx'
+import { InteractionPanel } from './InteractionPanel.tsx'
+import { StatusBar } from './StatusBar.tsx'
+import { Transcript } from './Transcript.tsx'
+
+/** How long a second Ctrl+C has to land, after the first, to quit (per the brief). */
+const CTRL_C_QUIT_WINDOW_MS = 1500
+/** Shown in the status line's `retry` segment (see the module doc's field-reuse note) after the first Ctrl+C. */
+const CTRL_C_HINT = 'press ctrl+c again to quit'
+/** Fallback width when the host terminal reports none (matches `Transcript`/`StatusBar`'s own `Math.max(1, …)` guards). */
+const DEFAULT_WIDTH = 80
+
+/**
+ * Structural subset of `ZealDriver` (`driver.ts`) this component calls. See
+ * the module doc's "PROPS CORRECTION" for why this is structural rather than
+ * the concrete class.
+ */
+export interface AppDriver {
+  send(text: string): void
+  interrupt(): void
+  switchModel(model: string, provider?: string): void
+  listSessions(limit?: number): Promise<PickerRow[]>
+}
+
+export interface AppProps {
+  store: ZealStore
+  driver: AppDriver
+  dispatcher: CommandDispatcher
+  onQuit(): void
+  /** Restart the driver on a `/resume` picker selection (or `/resume <id>`); see the module doc. */
+  onResume(sessionId: string): Promise<{ driver: AppDriver; dispatcher: CommandDispatcher }>
+}
+
+/** Local-only UI state for the `/resume` picker — not store-driven, unlike `state.interaction`. */
+interface PickerState {
+  rows: PickerRow[]
+}
+
+/** Render a thrown value's message, or its `String()` form for a non-Error throw. */
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+/** Split a `/`-prefixed line into its lowercase command name and trimmed remainder — mirrors `commands.ts`'s internal `splitCommandLine`, duplicated here (not exported) because this component needs to recognize `/resume` BEFORE dispatch, not after. */
+function parseCommandLine(line: string): { name: string; rest: string } {
+  const body = line.slice(1)
+  const spaceIdx = body.search(/\s/)
+  if (spaceIdx === -1) return { name: body.toLowerCase(), rest: '' }
+  return { name: body.slice(0, spaceIdx).toLowerCase(), rest: body.slice(spaceIdx).trim() }
+}
+
+export function App(props: AppProps): JSX.Element {
+  const { store, onQuit, onResume } = props
+
+  const subscribe = useMemo(() => store.subscribe.bind(store), [store])
+  const getSnapshot = useMemo(() => store.getState.bind(store), [store])
+  const state = useSyncExternalStore(subscribe, getSnapshot)
+
+  const [driver, setDriver] = useState<AppDriver>(props.driver)
+  const [dispatcher, setDispatcher] = useState<CommandDispatcher>(props.dispatcher)
+  const [picker, setPicker] = useState<PickerState | undefined>(undefined)
+  const [ctrlCHint, setCtrlCHint] = useState(false)
+
+  const lastCtrlCAtRef = useRef<number | undefined>(undefined)
+  const ctrlCTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  useEffect(() => () => {
+    if (ctrlCTimerRef.current !== undefined) clearTimeout(ctrlCTimerRef.current)
+  }, [])
+
+  const { columns } = useWindowSize()
+  const width = Math.max(1, columns || DEFAULT_WIDTH)
+
+  const editorInert = state.interaction !== undefined || picker !== undefined
+
+  async function performResume(sessionId: string): Promise<void> {
+    setPicker(undefined)
+    try {
+      const next = await onResume(sessionId)
+      setDriver(next.driver)
+      setDispatcher(next.dispatcher)
+      store.addNotice('info', `Resumed session ${sessionId}.`)
+    } catch (err) {
+      // Carry-forward 5: a resume rejection (e.g. `/resume <bad-id>`) must
+      // render as an error notice, never crash the TUI.
+      store.addNotice('error', `Failed to resume session ${sessionId}: ${errorText(err)}`)
+    }
+  }
+
+  async function openResumePicker(): Promise<void> {
+    try {
+      const rows = await driver.listSessions()
+      setPicker({ rows })
+    } catch (err) {
+      store.addNotice('error', `Failed to list sessions: ${errorText(err)}`)
+    }
+  }
+
+  function handleSubmit(line: string): void {
+    if (line.length === 0) return
+    if (dispatcher.isCommand(line)) {
+      const { name, rest } = parseCommandLine(line)
+      if (name === 'resume') {
+        if (rest.length > 0) void performResume(rest)
+        else void openResumePicker()
+        return
+      }
+      void dispatcher.dispatch(line).then((outcome) => {
+        if (outcome.uiText !== undefined) store.addNotice('info', outcome.uiText)
+        else if (!outcome.handled) store.addNotice('error', `Unknown command: ${line}`)
+      })
+      return
+    }
+    driver.send(line)
+  }
+
+  function handleResolve(id: number, result: ApprovalDecision | QuestionAnswer[]): void {
+    store.resolveInteraction(id, result)
+  }
+
+  useInput((input, key) => {
+    if (key.ctrl && input === 'c') {
+      const now = Date.now()
+      if (lastCtrlCAtRef.current !== undefined && now - lastCtrlCAtRef.current <= CTRL_C_QUIT_WINDOW_MS) {
+        onQuit()
+        return
+      }
+      lastCtrlCAtRef.current = now
+      setCtrlCHint(true)
+      if (ctrlCTimerRef.current !== undefined) clearTimeout(ctrlCTimerRef.current)
+      ctrlCTimerRef.current = setTimeout(() => {
+        setCtrlCHint(false)
+        lastCtrlCAtRef.current = undefined
+      }, CTRL_C_QUIT_WINDOW_MS)
+      return
+    }
+    if (key.escape) {
+      if (picker !== undefined) {
+        setPicker(undefined)
+        return
+      }
+      driver.interrupt()
+    }
+  })
+
+  // Field reuse (documented): the double-Ctrl+C hint rides `StatusModel`'s
+  // existing `retry` segment instead of adding a new field to a model/component
+  // outside this task's file list. It only ever displaces a genuine in-flight
+  // retry message for the ~1.5s hint window, which is an acceptable v1
+  // trade-off over widening `StatusBar`.
+  const displayStatus: StatusModel = ctrlCHint ? { ...state.status, retry: CTRL_C_HINT } : state.status
+
+  return (
+    <Box flexDirection="column">
+      <Transcript state={state} width={width} />
+      {state.interaction !== undefined && (
+        <InteractionPanel interaction={state.interaction} onResolve={handleResolve} />
+      )}
+      {state.interaction === undefined && picker !== undefined && (
+        <ResumePicker
+          rows={picker.rows}
+          onSelect={(sessionId) => void performResume(sessionId)}
+          onCancel={() => setPicker(undefined)}
+        />
+      )}
+      <Box display={editorInert ? 'none' : 'flex'}>
+        <InputEditor onSubmit={handleSubmit} isActive={!editorInert} />
+      </Box>
+      <StatusBar status={displayStatus} width={width} />
+    </Box>
+  )
+}
+
+/** The `/resume` picker: numbered/arrow-navigable session list, Enter confirms, App's global Esc handler cancels (see its `useInput`). */
+function ResumePicker(props: {
+  rows: PickerRow[]
+  onSelect: (sessionId: string) => void
+  onCancel: () => void
+}): JSX.Element {
+  const { rows, onSelect } = props
+  const [cursor, setCursor] = useState(0)
+
+  useInput((input, key) => {
+    if (rows.length === 0) return
+    if (key.upArrow) {
+      setCursor((c) => Math.max(0, c - 1))
+      return
+    }
+    if (key.downArrow) {
+      setCursor((c) => Math.min(rows.length - 1, c + 1))
+      return
+    }
+    if (key.return) {
+      const row = rows[cursor]
+      if (row) onSelect(row.sessionId)
+      return
+    }
+    // Coalesced multi-char chunk handling — see `InteractionPanel.tsx`'s
+    // module doc for why a plain `Number(input)` on the whole chunk is
+    // unsafe: Ink merges consecutive plain bytes read in one `stdin` chunk
+    // into a single `input` string.
+    for (const char of input) {
+      const digit = Number(char)
+      if (Number.isInteger(digit) && digit >= 1 && digit <= rows.length) {
+        const row = rows[digit - 1]
+        if (row) {
+          onSelect(row.sessionId)
+          return
+        }
+      }
+    }
+  })
+
+  return (
+    <Box flexDirection="column" borderStyle="round" paddingX={1}>
+      <Text bold>Resume session</Text>
+      {rows.length === 0 && <Text dimColor>No sessions found.</Text>}
+      {rows.map((row, index) => (
+        <Text key={row.sessionId}>
+          {`${index === cursor ? '› ' : '  '}[${index + 1}] ${row.title ?? row.sessionId}${row.live ? ' (live)' : ''}`}
+        </Text>
+      ))}
+      <Text dimColor>up/down or number selects · enter confirms · esc cancels</Text>
+    </Box>
+  )
+}

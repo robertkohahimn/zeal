@@ -426,6 +426,71 @@ describe('ZealDriver', () => {
 
     expect(flushCalls).toEqual([session])
   })
+
+  // Carry-forward from Task 12's review: `start()` used to discard
+  // `AgentHandle.dispose` entirely, so a session-switch/`/resume` restart had
+  // no way to retire the agent it was replacing. `dispose()` closes that gap.
+  it('(carry-forward 3) dispose() calls the AgentHandle.dispose minted by create()', async () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    const agentCtxCalls: FakeAgentCtx[] = []
+    const session = new FakeSession('dispose-session', [], 0)
+    const fakeAgent = new FakeAgent(session)
+    const agentCtx = new FakeAgentCtx()
+    agentCtxCalls.push(agentCtx)
+    let disposeCalls = 0
+    const agents = {
+      create: async (options: CreateAgentOptions): Promise<{ agent: Agent; dispose: () => Promise<void> }> => {
+        await options.setup?.(agentCtx as unknown as Context)
+        return { agent: fakeAgent as unknown as Agent, dispose: async () => { disposeCalls += 1 } }
+      },
+      resume: async (): Promise<{ agent: Agent; dispose: () => Promise<void> }> => {
+        throw new Error('resume should not be called in this test')
+      },
+    }
+    const ctx = fakeCtx({ agents, agentDefaultModel: fakeDefaultModel() })
+
+    const driver = await ZealDriver.start(ctx, store, {})
+    expect(disposeCalls).toBe(0)
+    await driver.dispose()
+    expect(disposeCalls).toBe(1)
+  })
+
+  it('(carry-forward 3) dispose() calls the AgentHandle.dispose minted by resume()', async () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    const seed = [fixtures.turnStart(1), fixtures.userMessage('resumed fact', 2), fixtures.turnEnd('completed', 3)]
+    const session = new FakeSession('resume-dispose-session', seed, 3)
+    const fakeAgent = new FakeAgent(session)
+    const agentCtx = new FakeAgentCtx()
+    let disposeCalls = 0
+    const agents = {
+      create: async (): Promise<{ agent: Agent; dispose: () => Promise<void> }> => {
+        throw new Error('create should not be called in this test')
+      },
+      resume: async (options: ResumeAgentOptions): Promise<{ agent: Agent; dispose: () => Promise<void> }> => {
+        await options.setup?.(agentCtx as unknown as Context)
+        return { agent: fakeAgent as unknown as Agent, dispose: async () => { disposeCalls += 1 } }
+      },
+    }
+    const ctx = fakeCtx({ agents, agentDefaultModel: fakeDefaultModel() })
+
+    const driver = await ZealDriver.start(ctx, store, { resumeSessionId: 'resume-dispose-session' })
+    await driver.dispose()
+    expect(disposeCalls).toBe(1)
+  })
+
+  it('agent exposes the real live Agent (needed by CommandDispatcher\'s ctx.commands seam, Task 14)', async () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    const agentCtxCalls: FakeAgentCtx[] = []
+    const session = new FakeSession('agent-exposure-session', [], 0)
+    const fakeAgent = new FakeAgent(session)
+    const { agents } = fakeAgentsReturning(fakeAgent, agentCtxCalls)
+    const ctx = fakeCtx({ agents, agentDefaultModel: fakeDefaultModel() })
+
+    const driver = await ZealDriver.start(ctx, store, {})
+
+    expect(driver.agent).toBe(fakeAgent)
+    expect(driver.agent.session).toBe(session)
+  })
 })
 
 /** Like `fakeAgents`, but always resolves `create`/`resume` with the exact `agent` provided (for tests that need to inspect its recorded calls). */

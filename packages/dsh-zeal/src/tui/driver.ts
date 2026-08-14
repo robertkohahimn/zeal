@@ -78,19 +78,31 @@ function toPickerRow(record: SessionRecord, title: string | undefined): PickerRo
  * safe to call).
  */
 export class ZealDriver {
-  /** The full live Agent — kept private so the driver alone owns the drive surface. */
+  /** The full live Agent — also exposed publicly as `agent` (see its doc comment for why). */
   private readonly liveAgent: Agent
   private readonly ctx: Context
   private readonly selection: ModelSelectionRef
+  /** The `AgentHandle.dispose` this driver's `create`/`resume` call minted — see `dispose()`. */
+  private readonly disposeHandle: () => Promise<void>
 
-  /** The narrow public view the brief's contract exposes: quiescence only. */
-  readonly agent: { whenIdle(): Promise<void> }
+  /**
+   * The live Agent this driver drives. Widened from Task 12's original
+   * quiescence-only `{ whenIdle(): Promise<void> }` view: Task 14's assembly
+   * needs the real `Agent` too — `ctx.commands.list(agent)`/`execute(agent,
+   * ...)` (the `CommandDispatcher` seam, `commands.ts`) require the actual
+   * `Agent` identity, not a narrowed stand-in, and `agent.session` is what
+   * the optional `sandboxPolicy`/`sessionTitle` services resolve/poll
+   * against. No test or caller relied on the narrower type (grepped before
+   * widening), so this is a pure widening, not a behavior change.
+   */
+  readonly agent: Agent
 
-  private constructor(ctx: Context, selection: ModelSelectionRef, liveAgent: Agent) {
+  private constructor(ctx: Context, selection: ModelSelectionRef, liveAgent: Agent, disposeHandle: () => Promise<void>) {
     this.ctx = ctx
     this.selection = selection
     this.liveAgent = liveAgent
     this.agent = liveAgent
+    this.disposeHandle = disposeHandle
   }
 
   /**
@@ -139,7 +151,7 @@ export class ZealDriver {
     }
 
     if (opts.resumeSessionId !== undefined) {
-      const { agent } = await ctx.agents.resume({
+      const { agent, dispose } = await ctx.agents.resume({
         resumeSessionId: SessionId(opts.resumeSessionId),
         agentOptions,
         setup,
@@ -150,17 +162,17 @@ export class ZealDriver {
       // this order is already correct ascending-seq order.
       for (const event of agent.session.events) store.apply(event)
       releaseBufferedLive()
-      return new ZealDriver(ctx, selection, agent)
+      return new ZealDriver(ctx, selection, agent, dispose)
     }
 
-    const { agent } = await ctx.agents.create({
+    const { agent, dispose } = await ctx.agents.create({
       sessionId: SessionId(`session-${randomUUID()}`),
       meta: { cwd: process.cwd() },
       agentOptions,
       setup,
     })
     releaseBufferedLive()
-    return new ZealDriver(ctx, selection, agent)
+    return new ZealDriver(ctx, selection, agent, dispose)
   }
 
   /** Queue `text` as an ordinary follow-up turn. The store shows the user entry via the resulting `user/message` session event. */
@@ -208,5 +220,21 @@ export class ZealDriver {
   /** Flush this agent's session to durable storage. */
   async flush(): Promise<void> {
     await this.ctx.sessions.flush(this.liveAgent.session)
+  }
+
+  /**
+   * Tear down this driver's live Agent: stop its loop, await exit,
+   * unregister it, and unwind its scoped world (`AgentHandle.dispose`'s
+   * contract — see `@deepseek-ai/dsh-agent`'s `index.d.ts`). Carry-forward
+   * from Task 12's review: `start()` previously discarded the
+   * `AgentHandle.dispose` capability entirely, so a session-switch/`/resume`
+   * restart had no way to retire the agent it was replacing — leaking its
+   * loop and scope. Callers that replace this driver (e.g. an assembly-level
+   * `/resume` restart) MUST await this before starting the replacement.
+   * Idempotent only to the extent the underlying `AgentHandle.dispose` is;
+   * this driver does not itself guard against a second call.
+   */
+  async dispose(): Promise<void> {
+    await this.disposeHandle()
   }
 }
