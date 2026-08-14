@@ -1,0 +1,9 @@
+This repository has getUser (async) and getUserSync (sync) duplicated
+across three files: src/serviceAlpha.ts, src/serviceBeta.ts, and
+src/serviceGamma.ts. Each caller in src/callers.ts imports from a different
+one of the three, inconsistently mixing the sync and async variants.
+
+Unify all of this into a single async getUser API: create one canonical
+module, remove the duplicated implementations from the three service files,
+and update every caller in src/callers.ts to import and await the single
+unified function. Run the tests to confirm they pass.
