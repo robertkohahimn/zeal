@@ -11,6 +11,15 @@
  * tick while streaming, and `Markdown` re-lexes its source on every render,
  * so memoizing on `source`/`width` skips re-lexing ticks where the text
  * hasn't actually changed.
+ *
+ * `<Static>` child keys: NOT `entry.seq` alone. `store.ts`'s turn-end fold
+ * can settle several entries (orphaned running tools, the trailing
+ * assistant entry, an error/abort notice) in the same flush, stamping every
+ * one of them with the same `seq` — a bare `key={entry.seq}` collides and
+ * trips React's duplicate-key warning. `Static`'s render prop's second
+ * argument is the absolute, collision-free index into the full items array
+ * (see `ink@7.1.1`'s `Static.js`), so the key combines it with `kind`+`seq`
+ * for readability while staying unique.
  * @module @zealagent/dsh-zeal/tui/ui/Transcript
  */
 import { Box, Static, Text } from 'ink'
@@ -28,7 +37,9 @@ export function Transcript(props: { state: ZealViewState; width: number }): JSX.
   return (
     <Box flexDirection="column" width={safeWidth}>
       <Static items={[...state.settled]}>
-        {(entry) => <SettledEntryView key={entry.seq} entry={entry} width={safeWidth} />}
+        {(entry, index) => (
+          <SettledEntryView key={`${entry.kind}-${entry.seq}-${index}`} entry={entry} width={safeWidth} />
+        )}
       </Static>
       {state.live && <LiveTurnView live={state.live} width={safeWidth} />}
     </Box>
