@@ -1,0 +1,6 @@
+Plan first, then implement: this repository has a small CLI in src/cli.ts
+that greets a name (run(['Ada']) returns "Hello, Ada!"). Add a --json flag
+so that when it is present, the CLI's run() function returns the same
+greeting as a JSON string (e.g. '{"greeting":"Hello, Ada!"}') instead of
+plain text. Keep the existing plain-text behavior when --json is absent.
+Run the tests to confirm they pass.
