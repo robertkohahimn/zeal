@@ -244,3 +244,76 @@ describe('InteractionPanel — plan review', () => {
     expect(onResolve).toHaveBeenCalledWith(7, [{ id: 'plan', selected: ['Option 1'] }])
   })
 })
+
+// Regression coverage for the fix-round-1 review finding: Ink coalesces
+// consecutive plain bytes read in one `stdin` chunk into a single multi-char
+// `input` string (fast typing, SSH bursts, or a test doing `stdin.write`
+// with more than one character at once) — every keyboard branch must walk
+// that string character-by-character instead of exact-matching the whole
+// chunk, or it silently no-ops and the interaction hangs.
+describe('InteractionPanel — coalesced multi-char stdin chunks', () => {
+  const approval: ApprovalPrompt = {
+    kind: 'approval',
+    id: 10,
+    title: 'Run rm -rf build/',
+    detail: 'delete build/',
+    agentLabel: 'main',
+  }
+
+  it('approval: a single "yy" chunk resolves exactly once with allow-once', () => {
+    const onResolve = vi.fn()
+    const { stdin } = render(<InteractionPanel interaction={approval} onResolve={onResolve} />)
+    stdin.write('yy')
+    expect(onResolve).toHaveBeenCalledTimes(1)
+    expect(onResolve).toHaveBeenCalledWith(10, 'allow-once' satisfies ApprovalDecision)
+  })
+
+  it('questions: a single "2\\r" chunk selects option 2 and submits', async () => {
+    const prompt: QuestionsPrompt = {
+      kind: 'questions',
+      id: 11,
+      items: [
+        {
+          id: 'q1',
+          question: 'Which approach?',
+          options: [{ label: 'Approach A' }, { label: 'Approach B' }],
+          multiSelect: false,
+          planReview: false,
+        },
+      ],
+    }
+    const onResolve = vi.fn()
+    const { stdin } = render(<InteractionPanel interaction={prompt} onResolve={onResolve} />)
+    await press(stdin, '2\r')
+    const expected: QuestionAnswer[] = [{ id: 'q1', selected: ['Approach B'] }]
+    expect(onResolve).toHaveBeenCalledTimes(1)
+    expect(onResolve).toHaveBeenCalledWith(11, expected)
+  })
+
+  it('custom mode: a multi-char chunk (paste) appends verbatim, digits/space/"c" included, with no hotkey side effects', async () => {
+    const prompt: QuestionsPrompt = {
+      kind: 'questions',
+      id: 12,
+      items: [
+        {
+          id: 'q1',
+          question: 'Anything else?',
+          options: [{ label: 'Yes' }, { label: 'No' }],
+          multiSelect: false,
+          planReview: false,
+        },
+      ],
+    }
+    const onResolve = vi.fn()
+    const { stdin } = render(<InteractionPanel interaction={prompt} onResolve={onResolve} />)
+    await press(stdin, 'c')
+    // If this chunk's digits/space/'c' were treated as hotkeys instead of
+    // pasted text, they'd move the option cursor, toggle a selection, or
+    // (mis-)re-enter custom mode instead of landing in the answer buffer.
+    await press(stdin, '42 c')
+    await press(stdin, '\r')
+    const expected: QuestionAnswer[] = [{ id: 'q1', selected: [], custom: '42 c' }]
+    expect(onResolve).toHaveBeenCalledTimes(1)
+    expect(onResolve).toHaveBeenCalledWith(12, expected)
+  })
+})
