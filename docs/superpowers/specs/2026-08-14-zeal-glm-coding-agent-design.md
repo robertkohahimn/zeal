@@ -401,6 +401,46 @@ are manual TUI passes.
 | V6 | Exact session resume flow (`ResumeAgentOptions` load path) and `session-query-sqlite` picker API | type names verified in READMEs; both are exercised by the web surface |
 | V7 | `llm-pi-ai:` settings-section layering semantics (whole-dict replace vs per-route merge) | `$DSH_HOME/settings.yaml` is home-level and shared across profiles — a section written by a prior `dsh web` run overrides Zeal's entry-config routes; wrong assumption → Zeal boots with zero GLM routes. Onboarding panel (§3.6) must mention this override path if V7 confirms replacement semantics |
 
+### Resolutions (2026-08-14, verified against harness source by three research passes)
+
+- **V1 — resolved.** Live push exists: `ctx.on('session/event', (session, event) => …)`, emitted
+  synchronously inside `Session.append()` (`packages/core/session/src/index.ts:76`, dispatch
+  `:641`). Per-delta (`assistant/chunk` carries raw `StreamChunk`s). Register on `agent.ctx`
+  (or in `setup(agentCtx)`) for one agent's feed. Constructor seeds (resume/fork history) are
+  never re-emitted — replay `agent.session.events` below `session.firstLiveSeq` manually.
+- **V2 — resolved.** `agent.cancel(cause: AgentCancelCause, options?: { keepInbox?: boolean })`
+  (`packages/core/agent/src/runtime-types.ts:85`); synchronous; aborts the in-flight provider
+  request; produces `turn/end` reason `{ kind: 'aborted' }`. The web stop button calls exactly
+  `agent.cancel({ kind: 'user' }, { keepInbox: true })`. Await `agent.whenIdle()` to observe.
+- **V3 — resolved, favorably.** Persistence is streaming: every `session/event` enters a
+  write-behind queue with a fixed 200 ms window, then a durable append with per-batch fsync;
+  checkpoint policy additionally flushes before every model request and top-level tool call.
+  Torn zstd frames are repaired on load. Crash loses ≤ the last ~200 ms. No periodic TUI flush
+  needed; quit-path `sessions.flush()` stands.
+- **V4 — resolved, favorably.** Title generation inherits the exact route from the session's
+  logged `request/header` when `provider`/`model` are unset — and base's row sets neither.
+  Titles ride the `zai` route; disabling `llm-deepseek` breaks nothing.
+- **V5 — resolved.** Row `name:` resolution is single-anchored at the **profile directory**
+  (Node ESM parent-walk); dsh-initialized profiles get `nodeLinker: hoisted`, so a bundle's
+  regular (non-peer) dependencies land at the profile root and resolve. Hardened rule: every
+  package our patch rows name is a **regular dependency of the bundle** (never a peer); the
+  launcher's direct install of `code-runtime` stays as insurance against version-conflict
+  nesting. Do not touch the dsh-written `pnpm-workspace.yaml`.
+- **V6 — resolved.** `ctx.agents.resume({ resumeSessionId, agentOptions?, setup? })` →
+  `AgentHandle` (`packages/core/agent/src/index.ts:424`; requires the persistence backend base
+  mounts). Picker: `ctx.sessionQuery.listSessions()` (newest-first, live+cold) +
+  `readTitleSnapshots(ids)`; `filterSessions` supports a `cwd` filter.
+- **V7 — resolved, favorably.** Settings-section layering is a per-key **deep merge**: the
+  `providers` dict merges per route, and settings can add or override routes but **cannot
+  remove** composition routes (upstream test `llm-pi-ai/tests/dynamic-config.spec.ts:89-114`
+  proves the exact both-routes-survive scenario). The "zero GLM routes" fear is retired; what
+  remains is a README note that `settings.yaml` is home-level and shared across profiles, so a
+  section written by `dsh web` can override individual fields of Zeal's routes.
+- **Commands seam (post-spec verification).** `ctx.commands.execute(agent, line, signal)`
+  runs registered slash commands (`/compact`, `/goal`, `/plan` from base's producers);
+  `list(agent)` feeds autocomplete. The TUI dispatches any `/`-prefixed input through it and
+  falls back to its local commands.
+
 ## 8. Out of scope for v1
 
 Windows support; the dsh Web UI; benchmark scoring (BENCHMARK.md-style);
