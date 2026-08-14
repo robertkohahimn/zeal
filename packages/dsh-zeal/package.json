@@ -3,6 +3,12 @@
   "version": "0.1.0",
   "type": "module",
   "description": "Zeal: GLM-powered terminal coding agent bundle for DeepSeek Harness",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/robertkohahimn/zeal.git",
+    "directory": "packages/dsh-zeal"
+  },
   "engines": { "node": ">=22" },
   "exports": {
     ".": { "types": "./lib/startup.d.ts", "default": "./lib/startup.js" },

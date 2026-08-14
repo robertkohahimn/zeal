@@ -189,11 +189,25 @@ same machine.
   never re-wrap on terminal resize** — this is standard for this class of
   TUI, but be aware that resizing your terminal mid-session will not reflow
   already-printed output.
-- The status bar always shows token counts and context fill, never a derived
-  dollar cost — the `zai` catalogs price every model at 0, so a currency
-  figure would be confidently wrong rather than merely absent.
+- The status bar shows a `ctx NN%` context-fill segment once the first reply
+  with token usage lands — computed from that reply's own token count
+  against the current model's context window (a small static table in
+  `packages/dsh-zeal/src/tui/model-windows.ts`; an unrecognized model id
+  falls back to 200k). It reflects only the LATEST reply, not a running sum
+  across the session, and is omitted entirely before any usage has arrived.
+  It never shows raw token counts or a derived dollar cost — the `zai`
+  catalogs price every model at 0, so a currency figure would be confidently
+  wrong rather than merely absent.
 - Multiline input is via an explicit keybinding, not auto-detection.
   IME composition guarantees and a kill-ring are out of scope for v1.
+- GLM reasoning renders always-dimmed, with no toggle to show/hide it; tool
+  call panels show a fixed-size preview with no collapse/expand interaction;
+  and a running bash call shows only a spinner until it settles — its output
+  is not streamed live, only shown as a preview once the call finishes. See
+  the design spec's §8 ("Out of scope for v1") for the full rationale on each.
+- While the input line starts with `/`, a dim hint line under the editor
+  lists up to 6 matching command names — display only, there is no
+  tab-cycling or selection.
 
 ## Platform support
 

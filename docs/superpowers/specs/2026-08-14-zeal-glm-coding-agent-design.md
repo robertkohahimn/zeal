@@ -185,8 +185,12 @@ lines never re-wrap on terminal resize (standard for this class of tool).
 
 Layout:
 
-- streamed assistant markdown; GLM reasoning blocks dimmed and toggleable;
-- tool calls as one-line collapsible panels; bash shows a streaming output tail;
+- streamed assistant markdown; GLM reasoning blocks dimmed and toggleable
+  (**v1 narrowing — see §8**: reasoning renders always-dimmed, with no
+  toggle);
+- tool calls as one-line collapsible panels; bash shows a streaming output
+  tail (**v1 narrowing — see §8**: fixed preview caps, no collapse/expand;
+  previews appear at settle, not as a live streaming tail);
 - subagent activity nested under the delegating tool call (how dsh surfaces it);
 - status bar: model/route, session title, **token counts and context fill —
   never derived dollar cost** (the zai catalogs price all models at 0; a
@@ -447,6 +451,23 @@ Windows support; the dsh Web UI; benchmark scoring (BENCHMARK.md-style);
 `/mcp add` command; IME/kill-ring editor features; a dedicated `llm-glm`
 provider plugin (fallback only if pi-ai's compat knobs prove insufficient — the
 patch isolates the provider rows so a swap is one layer).
+
+Three §3.4 renderer promises narrowed during implementation (final-review fix
+wave, Ruling R5 / I6c) — each is a genuine v1 boundary, not a bug, and each is
+flagged inline at its §3.4 callout above:
+
+- **Reasoning-block toggle.** §3.4 says GLM reasoning blocks are "dimmed and
+  toggleable." v1 renders reasoning always-dimmed (`Transcript.tsx`); there is
+  no keybinding or command to show/hide it. A toggle is a small, self-contained
+  follow-up once there's a natural keybinding slot for it.
+- **Collapsible tool panels.** §3.4 says tool calls render as "one-line
+  collapsible panels." v1's `ToolPanel` has no collapse/expand interaction —
+  previews are shown at a fixed cap (a handful of lines for a settled `ok`
+  result, more for `error`) with no way to expand past it or collapse further.
+- **Bash streaming output tail.** §3.4 says bash "shows a streaming output
+  tail." v1 shows the tool's preview only once it settles (`tool/result`), not
+  as a live-updating tail while the command is still running — a long-running
+  bash call shows only the running-spinner `ToolPanel` until it finishes.
 
 ## 9. Decision log
 
