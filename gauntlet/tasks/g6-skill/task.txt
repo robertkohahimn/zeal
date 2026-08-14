@@ -1,0 +1,4 @@
+Add a titleCase(input: string): string function to src/format.ts that
+converts a string to Title Case (e.g. "hello world" -> "Hello World").
+Follow this repository's conventions for new functions. Run the tests to
+confirm they pass.
