@@ -1,0 +1,2 @@
+Call the lookup_constant tool from the mcp server and write its value into
+constant.txt.
