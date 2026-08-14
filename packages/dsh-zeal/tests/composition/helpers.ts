@@ -52,12 +52,54 @@ export interface ComposedProfile {
  */
 const JS_TAG = { tag: 'tag:yaml.org,2002:js', resolve: (value: string) => String(value) }
 
+// `execFileSync`'s blocking wait is on the libuv/OS layer, outside the JS
+// event loop — vitest's `testTimeout` can only observe it AFTER the call
+// returns, so it cannot interrupt a hung child (e.g. a stalled registry
+// fetch during `pnpm dlx`). Node's own `timeout`/`killSignal` options are
+// honored by libuv itself and actually kill the child, so every
+// `execFileSync` below sets them explicitly rather than relying on the
+// vitest-level timeout as a backstop.
+const BUILD_TIMEOUT_MS = 120_000
+const DLX_TIMEOUT_MS = 300_000
+
 function dlx(args: string[], dshHome: string): string {
   return execFileSync('pnpm', ['dlx', `@deepseek-ai/dsh@${DSH_VERSION}`, ...args], {
     env: { ...process.env, DSH_HOME: dshHome },
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
+    timeout: DLX_TIMEOUT_MS,
+    killSignal: 'SIGKILL',
   })
+}
+
+// `pnpm run build` writes to this package's own, SHARED `lib/` directory
+// (packages/dsh-zeal/lib) — not to any per-call tmp dir. vitest runs test
+// files in parallel by default, and Tasks 17/18 add more test files that
+// reuse `setupProfile`; two concurrent `tsdown` invocations racing on the
+// same `lib/` output (one process's "Cleaning N files" landing mid another
+// process's write) is a real hazard once more than one composition test
+// file exists. Two mitigations, both cheap:
+//  - in-process memoization: a given worker process builds at most once,
+//    even if `setupProfile` is called more than once in it;
+//  - `ZEAL_SKIP_BUILD=1`: an escape hatch for cross-process coordination —
+//    build once up front (`pnpm --filter @zealagent/dsh-zeal run build`),
+//    then run every gated composition file with `ZEAL_SKIP_BUILD=1` set so
+//    no worker touches `lib/` again. The pack step is NOT memoized/guarded
+//    this way: it writes into the caller's own `tmp` dir (unique per call,
+//    confirmed below), so concurrent `pnpm pack` calls from different
+//    workers never collide with each other.
+let built = false
+
+function buildBundle(): void {
+  if (process.env['ZEAL_SKIP_BUILD']) return
+  if (built) return
+  execFileSync('pnpm', ['run', 'build'], {
+    cwd: BUNDLE_DIR,
+    encoding: 'utf8',
+    timeout: BUILD_TIMEOUT_MS,
+    killSignal: 'SIGKILL',
+  })
+  built = true
 }
 
 /**
@@ -68,12 +110,20 @@ function dlx(args: string[], dshHome: string): string {
  */
 export function setupProfile(tmp: string): ComposedProfile {
   // lib/ must exist before `pnpm pack` — pack only ships what "files" globs
-  // match on disk, it does not run the build script itself.
-  execFileSync('pnpm', ['run', 'build'], { cwd: BUNDLE_DIR, encoding: 'utf8' })
+  // match on disk, it does not run the build script itself. See the
+  // `buildBundle` doc above for why this is guarded rather than
+  // unconditional.
+  buildBundle()
 
+  // `--pack-destination tmp` is the caller's own `mkdtempSync` directory
+  // (unique per `setupProfile` call/test file), so the tarball's path never
+  // collides across concurrent callers even though the package name+version
+  // (and hence the tarball's basename) is the same for all of them.
   const packOut = execFileSync('pnpm', ['pack', '--json', '--pack-destination', tmp], {
     cwd: BUNDLE_DIR,
     encoding: 'utf8',
+    timeout: BUILD_TIMEOUT_MS,
+    killSignal: 'SIGKILL',
   })
   const { filename: tarballPath } = JSON.parse(packOut) as { filename: string }
 
