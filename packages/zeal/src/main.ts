@@ -1,5 +1,6 @@
+#!/usr/bin/env node
 import { createRequire } from 'node:module'
-import { readFileSync } from 'node:fs'
+import { readFileSync, realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -122,7 +123,36 @@ export function main(argv: string[] = process.argv.slice(2)): void {
   process.exit(child.status ?? 1)
 }
 
-const isMainModule = Boolean(process.argv[1]) && import.meta.url === pathToFileURL(process.argv[1] as string).href
+/**
+ * True when this module was invoked directly as the process entry point
+ * (`node main.js …`), as opposed to merely being imported.
+ *
+ * `import.meta.url` is realpath'd by Node's ESM loader before this module's
+ * top-level code ever runs (Node resolves symlinks while loading an ES
+ * module unless `--preserve-symlinks` is passed), but `process.argv[1]` is
+ * NOT — it is whatever path the OS invoked, verbatim. `npm`/`pnpm` install a
+ * package's `bin` entry as a symlink under `node_modules/.bin`, so `npx
+ * @zealagent/zeal` (or a global install) launches this file through exactly
+ * such a symlink: `import.meta.url` becomes the real `lib/main.js` path
+ * while `process.argv[1]` stays the `.bin/zeal` symlink path. A direct
+ * string/URL comparison between the two then never matches, so `isMainModule`
+ * evaluated `false`, `main()` was never called, and the process exited 0
+ * having silently done nothing — no error, no output, just an inert launcher.
+ * `realpathSync` here resolves the symlink on the `argv[1]` side too, so the
+ * comparison is symlink-invariant either way. Wrapped in try/catch because a
+ * nonexistent/unreadable `argv[1]` (unusual, but not this module's problem to
+ * crash on) should fall back to the raw path rather than throw before `main`
+ * ever gets a chance to run.
+ */
+function resolveMainModulePath(argvPath: string): string {
+  try {
+    return realpathSync(argvPath)
+  } catch {
+    return argvPath
+  }
+}
+
+const isMainModule = Boolean(process.argv[1]) && import.meta.url === pathToFileURL(resolveMainModulePath(process.argv[1] as string)).href
 if (isMainModule) {
   main()
 }
