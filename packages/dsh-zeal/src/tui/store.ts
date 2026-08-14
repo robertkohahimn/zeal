@@ -26,16 +26,45 @@
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ZealEvent } from './normalize.ts'
 import { normalizeEvent } from './normalize.ts'
-import type { AssistantEntry, NoticeEntry, StatusModel, ToolEntry, TranscriptEntry, ZealViewState } from './model.ts'
+import type {
+  ApprovalDecision,
+  ApprovalPrompt,
+  AssistantEntry,
+  NoticeEntry,
+  PendingInteraction,
+  QuestionAnswer,
+  QuestionItem,
+  QuestionsPrompt,
+  StatusModel,
+  ToolEntry,
+  TranscriptEntry,
+  ZealViewState,
+} from './model.ts'
 
 /** Listener notifications are coalesced onto this interval. */
 const NOTIFY_COALESCE_MS = 16
+
+/**
+ * One queued `askApproval`/`askQuestions` request. `resolve`/`reject` are the
+ * executor functions of the promise handed back to the caller; `signal`/
+ * `onAbort` are only present when the caller passed an `AbortSignal`, so the
+ * listener can be torn down once the request settles by other means.
+ */
+interface InteractionEntry {
+  prompt: PendingInteraction
+  resolve: (result: ApprovalDecision | QuestionAnswer[]) => void
+  reject: (reason: unknown) => void
+  signal?: AbortSignal
+  onAbort?: () => void
+}
 
 export class ZealStore {
   private state: ZealViewState
   private lastSeq = 0
   private readonly listeners = new Set<() => void>()
   private timer: ReturnType<typeof setTimeout> | undefined
+  private readonly interactionQueue: InteractionEntry[] = []
+  private nextInteractionId = 1
 
   constructor(initialStatus: { provider: string; model: string }) {
     this.state = {
@@ -76,6 +105,93 @@ export class ZealStore {
   setStatus(patch: Partial<StatusModel>): void {
     this.state = { ...this.state, status: { ...this.state.status, ...patch } }
     this.scheduleNotify()
+  }
+
+  /**
+   * Queue an approval request. Resolves with the `ApprovalDecision` passed to
+   * `resolveInteraction`, or rejects with `signal`'s abort reason if it fires
+   * (or is already aborted) before that happens.
+   */
+  askApproval(input: Omit<ApprovalPrompt, 'kind' | 'id'>, signal?: AbortSignal): Promise<ApprovalDecision> {
+    const prompt: ApprovalPrompt = { kind: 'approval', id: this.nextInteractionId++, ...input }
+    return new Promise<ApprovalDecision>((resolve, reject) => {
+      const settle = (result: ApprovalDecision | QuestionAnswer[]): void => resolve(result as ApprovalDecision)
+      this.enqueueInteraction(prompt, settle, reject, signal)
+    })
+  }
+
+  /**
+   * Queue a batch of questions. Resolves with the `QuestionAnswer[]` passed
+   * to `resolveInteraction`, or rejects with `signal`'s abort reason if it
+   * fires (or is already aborted) before that happens.
+   */
+  askQuestions(items: QuestionItem[], signal?: AbortSignal): Promise<QuestionAnswer[]> {
+    const prompt: QuestionsPrompt = { kind: 'questions', id: this.nextInteractionId++, items }
+    return new Promise<QuestionAnswer[]>((resolve, reject) => {
+      const settle = (result: ApprovalDecision | QuestionAnswer[]): void => resolve(result as QuestionAnswer[])
+      this.enqueueInteraction(prompt, settle, reject, signal)
+    })
+  }
+
+  /**
+   * Settle the queued request with the given `id` (normally the head, i.e.
+   * `state.interaction`) with `result`, resolving its promise and promoting
+   * the next queued request (if any) into `state.interaction`. A no-op if
+   * `id` no longer matches anything queued (e.g. it was already settled or
+   * aborted).
+   */
+  resolveInteraction(id: number, result: ApprovalDecision | QuestionAnswer[]): void {
+    const idx = this.interactionQueue.findIndex(entry => entry.prompt.id === id)
+    if (idx === -1) return
+    const entry = this.interactionQueue[idx]!
+    this.interactionQueue.splice(idx, 1)
+    if (entry.signal && entry.onAbort) entry.signal.removeEventListener('abort', entry.onAbort)
+    entry.resolve(result)
+    this.syncInteractionState()
+    this.scheduleNotify()
+  }
+
+  /** Push a request onto the queue (or reject it outright if already aborted), wiring up abort handling. */
+  private enqueueInteraction(
+    prompt: PendingInteraction,
+    resolve: (result: ApprovalDecision | QuestionAnswer[]) => void,
+    reject: (reason: unknown) => void,
+    signal: AbortSignal | undefined,
+  ): void {
+    const entry: InteractionEntry = { prompt, resolve, reject }
+    if (signal) {
+      if (signal.aborted) {
+        reject(signal.reason)
+        return
+      }
+      entry.signal = signal
+      entry.onAbort = () => this.removeInteraction(entry, signal.reason)
+      signal.addEventListener('abort', entry.onAbort, { once: true })
+    }
+    this.interactionQueue.push(entry)
+    this.syncInteractionState()
+    this.scheduleNotify()
+  }
+
+  /** Remove a still-queued entry (head or not) and reject it, e.g. on late abort. */
+  private removeInteraction(entry: InteractionEntry, reason: unknown): void {
+    const idx = this.interactionQueue.indexOf(entry)
+    if (idx === -1) return
+    this.interactionQueue.splice(idx, 1)
+    entry.reject(reason)
+    this.syncInteractionState()
+    this.scheduleNotify()
+  }
+
+  /** Sync `state.interaction` to the current queue head (or clear it when the queue is empty). */
+  private syncInteractionState(): void {
+    const head = this.interactionQueue[0]
+    if (head) {
+      this.state = { ...this.state, interaction: head.prompt }
+    } else {
+      const { interaction: _droppedInteraction, ...rest } = this.state
+      this.state = rest
+    }
   }
 
   private notice(seq: number, level: 'info' | 'error', text: string): NoticeEntry {

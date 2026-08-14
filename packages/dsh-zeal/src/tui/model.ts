@@ -1,9 +1,9 @@
 /**
  * View-model types the transcript store (`store.ts`) folds `ZealEvent`s into
- * and the TUI renders. Per Controller Ruling R1 on this task, the
- * `interaction` field the brief's `ZealViewState` sketch shows is omitted
- * here — Task 6 adds it (and the `PendingInteraction` type) alongside the
- * confirmation-flow store logic that produces it.
+ * and the TUI renders. Per Controller Ruling R1, the `interaction` field and
+ * `PendingInteraction` type were deliberately left out of Task 5 and added
+ * here in Task 6, alongside the confirmation-flow queue logic in `store.ts`
+ * that produces and settles them.
  * @module @zealagent/dsh-zeal/tui/model
  */
 
@@ -44,9 +44,39 @@ export interface StatusModel {
   contextFill?: number
 }
 
+/** A yes/no approval request — e.g. "allow this tool call?" */
+export interface ApprovalPrompt { kind: 'approval'; id: number; title: string; detail: string; agentLabel: string }
+
+/** One selectable choice within a `QuestionItem`. */
+export interface QuestionOption { label: string; description?: string }
+
+/** One question within a `QuestionsPrompt` — may allow multiple selections or a plan review. */
+export interface QuestionItem {
+  id: string
+  question: string
+  detail?: string
+  header?: string
+  options: QuestionOption[]
+  multiSelect: boolean
+  planReview: boolean
+}
+
+/** A batch of questions posed to the user together (e.g. a plan-review checkpoint). */
+export interface QuestionsPrompt { kind: 'questions'; id: number; items: QuestionItem[] }
+
+/** Whatever the store currently needs the user to resolve before the agent can proceed. */
+export type PendingInteraction = ApprovalPrompt | QuestionsPrompt
+
+/** The user's answer to an `ApprovalPrompt`. */
+export type ApprovalDecision = 'allow-once' | 'reject'
+
+/** The user's answer to one `QuestionItem` within a `QuestionsPrompt`. */
+export interface QuestionAnswer { id: string; selected: string[]; custom?: string }
+
 /** The full view model `ZealStore` exposes to the TUI. */
 export interface ZealViewState {
   settled: readonly TranscriptEntry[]
   live?: LiveTurn
   status: StatusModel
+  interaction?: PendingInteraction
 }
