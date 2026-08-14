@@ -1,0 +1,10 @@
+{
+  "name": "@zealagent/zeal",
+  "version": "0.1.0",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "bin": { "zeal": "./lib/main.js" },
+  "files": ["lib"],
+  "scripts": { "build": "tsdown src/main.ts --format esm --out-dir lib" },
+  "dependencies": { "@deepseek-ai/dsh": "0.1.0-rc.6" }
+}
