@@ -61,4 +61,48 @@ describe('Markdown', () => {
     expect(lines.length).toBeGreaterThan(1)
     for (const line of lines) expect(line.length).toBeLessThanOrEqual(20)
   })
+
+  // Review finding 1: tables previously fell through to a raw-markdown
+  // fallback (`| Name | Age |` etc. rendered verbatim). Table tokens now get
+  // a minimal readable rendering — one line per row, cells joined with
+  // " │ ", header followed by a dim rule — and must never leak the raw
+  // pipe-delimited/`---` source syntax.
+  it('renders tables as readable rows without leaking raw markdown syntax', () => {
+    const source = '| Name | Age |\n| --- | --- |\n| Alice | 30 |\n| Bob | 25 |'
+    const { lastFrame } = render(<Markdown width={40} source={source} />)
+    const frame = lastFrame()!
+    expect(frame).toContain('Name')
+    expect(frame).toContain('Age')
+    expect(frame).toContain('Alice')
+    expect(frame).toContain('30')
+    expect(frame).toContain('Bob')
+    expect(frame).toContain('25')
+    // No literal ascii pipe or header-separator dashes from the raw source.
+    expect(frame).not.toContain('|')
+    expect(frame).not.toContain('---')
+  })
+
+  // Review finding 3(a): the width invariant was only exercised on the
+  // paragraph (Ink-native `wrap="wrap"`) path. Fenced code uses a different
+  // mechanism (`wrap="truncate"`, per source line) — exercise it directly.
+  it('caps fenced code lines at width even for an unbroken 200+ char line', () => {
+    const longLine = 'y'.repeat(220)
+    const source = `\`\`\`\n${longLine}\n\`\`\``
+    const { lastFrame } = render(<Markdown width={40} source={source} />)
+    for (const line of lastFrame()!.split('\n')) expect(line.length).toBeLessThanOrEqual(40)
+  })
+
+  // Review finding 3(b): blockquotes use this module's own `wrapWords`
+  // hard-chunking (not Ink's native wrap) because the `│ ` prefix must
+  // repeat on every line — exercise that mechanism's width guarantee too.
+  it('hard-wraps an unbroken 200+ char word inside a blockquote, prefixing every line', () => {
+    const longWord = 'z'.repeat(220)
+    const { lastFrame } = render(<Markdown width={40} source={`> ${longWord}`} />)
+    const lines = lastFrame()!.split('\n').filter((line) => line.length > 0)
+    expect(lines.length).toBeGreaterThan(1)
+    for (const line of lines) {
+      expect(line.length).toBeLessThanOrEqual(40)
+      expect(line.startsWith('│ ')).toBe(true)
+    }
+  })
 })

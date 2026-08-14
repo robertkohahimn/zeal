@@ -31,12 +31,13 @@ import type { JSX, Key, ReactNode } from 'react'
 
 export function Markdown(props: { source: string; width: number }): JSX.Element {
   const { source, width } = props
+  const safeWidth = Math.max(1, width)
   const tokens = marked.lexer(source).filter((token) => token.type !== 'space')
   return (
-    <Box flexDirection="column" width={width}>
+    <Box flexDirection="column" width={safeWidth}>
       {tokens.map((token, index) => (
         <Box key={index} flexDirection="column" marginBottom={index < tokens.length - 1 ? 1 : 0}>
-          {renderBlock(token, width)}
+          {renderBlock(token, safeWidth)}
         </Box>
       ))}
     </Box>
@@ -70,6 +71,8 @@ function renderBlock(token: Token, width: number): ReactNode {
       return renderBlockquote(token as Tokens.Blockquote, safeWidth)
     case 'list':
       return renderList(token as Tokens.List, safeWidth)
+    case 'table':
+      return renderTable(token as Tokens.Table, safeWidth)
     case 'hr':
       return (
         <Box width={safeWidth}>
@@ -92,6 +95,11 @@ function renderBlock(token: Token, width: number): ReactNode {
   }
 }
 
+// SANCTIONED CHOICE (task-7 review finding 2, controller ruling — no further
+// action): fenced code is rendered `dimColor`-only (dim foreground), not a
+// `backgroundColor` panel. A literal background block was judged
+// terminal-theme-hostile (fights light/dark/high-contrast themes and
+// arbitrary user palettes), whereas `dimColor` degrades safely everywhere.
 function renderCodeBlock(token: Tokens.Code, width: number): ReactNode {
   const lines = token.text.split('\n')
   return (
@@ -103,6 +111,37 @@ function renderCodeBlock(token: Tokens.Code, width: number): ReactNode {
       ))}
     </Box>
   )
+}
+
+/**
+ * Minimal readable table rendering (task-7 review finding 1): one line per
+ * row, cells joined with " │ ", header line followed by a dim rule line.
+ * Every line goes through Ink's native `wrap="truncate"` (same mechanism as
+ * fenced code lines) so the width invariant holds without hand-rolled
+ * truncation. Cell content is flattened via `flattenCellTokens` (preferring
+ * each cell's parsed `.tokens` over its raw `.text`, since `.text` retains
+ * unparsed markdown syntax, e.g. `**Alice**` instead of `Alice`) so styled
+ * cells don't leak markup either.
+ */
+function renderTable(token: Tokens.Table, width: number): ReactNode {
+  const headerLine = token.header.map(flattenCellTokens).join(' │ ')
+  const ruleLine = '─'.repeat(width)
+  const rowLines = token.rows.map((row) => row.map(flattenCellTokens).join(' │ '))
+  const lines = [headerLine, ruleLine, ...rowLines]
+  return (
+    <Box flexDirection="column" width={width}>
+      {lines.map((line, index) => (
+        <Text key={index} bold={index === 0} dimColor={index === 1} wrap="truncate">
+          {line}
+        </Text>
+      ))}
+    </Box>
+  )
+}
+
+function flattenCellTokens(cell: Tokens.TableCell): string {
+  const text = flattenTokens(cell.tokens) || cell.text
+  return normalizeWhitespace(text).trim()
 }
 
 function renderBlockquote(token: Tokens.Blockquote, width: number): ReactNode {
@@ -251,8 +290,29 @@ function normalizeWhitespace(text: string): string {
   return text.replace(/\s+/g, ' ')
 }
 
-/** Recursively flattens a token's inline `tokens` (if any) into plain text. */
+/** Flattens an array of tokens (e.g. a table cell's `.tokens`) into plain text. */
+function flattenTokens(tokens: Token[] | undefined): string {
+  if (!tokens || tokens.length === 0) return ''
+  return tokens.map(extractPlainText).join('')
+}
+
+/**
+ * Recursively flattens a token's inline `tokens` (if any) into plain text.
+ * This is a defensive fallback path used for out-of-scope/unhandled token
+ * types (e.g. inside a blockquote or list item) — it must never fall back to
+ * a token's raw markdown source for token types that have their own
+ * structured content, since that would leak literal markup (e.g. a `table`
+ * token's `.raw` is the pipe-delimited source text). `table` is special-cased
+ * for that reason; `renderTable` is the primary (nicer) path for top-level
+ * tables, this is the safety net for tables nested somewhere else.
+ */
 function extractPlainText(token: Token): string {
+  if (token.type === 'table') {
+    const t = token as Tokens.Table
+    const header = t.header.map(flattenCellTokens).join(' ')
+    const rows = t.rows.map((row) => row.map(flattenCellTokens).join(' ')).join(' ')
+    return normalizeWhitespace(`${header} ${rows}`).trim()
+  }
   const withTokens = token as { tokens?: Token[]; text?: string; raw?: string }
   if (withTokens.tokens && withTokens.tokens.length > 0) {
     return withTokens.tokens.map(extractPlainText).join('')
