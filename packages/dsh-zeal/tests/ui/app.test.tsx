@@ -231,4 +231,124 @@ describe('App', () => {
     expect(lastFrame()!).toContain('Failed to resume session bad-id')
     expect(lastFrame()!).toContain('no such session: bad-id')
   })
+
+  // IMPORTANT 4 (Task 14 review): `dispatcher.dispatch(line)` can reject —
+  // a throwing seam command — and without a `.catch` that becomes an
+  // unhandled promise rejection instead of an in-TUI error. Vitest fails a
+  // run on an unhandled rejection, so this test's mere passing (plus the
+  // asserted notice) is the regression check.
+  it('a rejecting seam command renders an error notice instead of an unhandled rejection', async () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    const driver = fakeDriver()
+    const seam = {
+      list: () => [{ name: 'boom', description: 'Always throws' }],
+      execute: async (): Promise<never> => {
+        throw new Error('seam exploded')
+      },
+    }
+    const dispatcher = new CommandDispatcher({ seam, agent: {}, locals: [] })
+    const { stdin, lastFrame } = render(
+      <App store={store} driver={driver} dispatcher={dispatcher} onQuit={vi.fn()} onResume={vi.fn()} />,
+    )
+    await press(stdin, '/boom', '\r')
+    await settle()
+    expect(lastFrame()!).toContain('Command failed: seam exploded')
+    expect(driver.sendCalls).toEqual([])
+  })
+
+  // IMPORTANT 5 (Task 14 review): the editor must stay inert for the WHOLE
+  // resume await, and typed input during that window must never reach
+  // `driver.send()` on the driver that's about to be disposed/replaced.
+  it('typing during an in-flight resume is swallowed (editor inert); post-resume input reaches only the new driver', async () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    const driver = fakeDriver()
+    const newDriver = fakeDriver()
+    let resolveResume: ((value: { driver: AppDriver; dispatcher: CommandDispatcher }) => void) | undefined
+    const onResume = vi.fn(
+      () =>
+        new Promise<{ driver: AppDriver; dispatcher: CommandDispatcher }>((resolve) => {
+          resolveResume = resolve
+        }),
+    )
+    const { stdin } = render(
+      <App store={store} driver={driver} dispatcher={buildDispatcher()} onQuit={vi.fn()} onResume={onResume} />,
+    )
+    await press(stdin, '/resume sess-1', '\r')
+    await settle()
+    expect(onResume).toHaveBeenCalledTimes(1)
+
+    // Typed WHILE the resume is still pending — must not reach either driver.
+    await press(stdin, 'hello', '\r')
+    expect(driver.sendCalls).toEqual([])
+    expect(newDriver.sendCalls).toEqual([])
+
+    // A second resume attempt while one is in flight is ignored outright.
+    await press(stdin, '/resume sess-2', '\r')
+    await settle()
+    expect(onResume).toHaveBeenCalledTimes(1)
+
+    resolveResume!({ driver: newDriver, dispatcher: buildDispatcher() })
+    await settle()
+
+    await press(stdin, 'world', '\r')
+    expect(newDriver.sendCalls).toEqual(['world'])
+    expect(driver.sendCalls).toEqual([])
+  })
+
+  // IMPORTANT 5, targeted: two picker selections fired in the SAME
+  // synchronous tick (no yield between the two `stdin.write` calls) must
+  // still only trigger one `onResume` call. `resuming` (React state) alone
+  // would not catch this — it batches — so `performResume`'s guard must be
+  // a synchronous `ref`, not state. Mirrors the "same-tick burst" hazard
+  // `InputEditor.tsx`'s tests already cover for a different component.
+  it('two picker selections in the same tick trigger only one resume (re-entry guard survives a same-tick race)', async () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    const driver = fakeDriver()
+    driver.listSessionsResult = [
+      { sessionId: 'sess-a', createdAt: 1, live: false, title: 'A' },
+      { sessionId: 'sess-b', createdAt: 2, live: false, title: 'B' },
+    ]
+    const newDriver = fakeDriver()
+    const onResume = vi.fn(async (_sessionId: string) => ({ driver: newDriver, dispatcher: buildDispatcher() }))
+    const { stdin } = render(
+      <App store={store} driver={driver} dispatcher={buildDispatcher()} onQuit={vi.fn()} onResume={onResume} />,
+    )
+    await press(stdin, '/resume', '\r')
+    await settle()
+
+    // No yield between these two writes — same synchronous burst.
+    stdin.write('1')
+    stdin.write('2')
+    await settle()
+
+    expect(onResume).toHaveBeenCalledTimes(1)
+    expect(onResume).toHaveBeenCalledWith('sess-a')
+  })
+
+  // IMPORTANT 5: Esc must not call `interrupt()` on a driver mid-resume —
+  // the `driver` reference during that window is the OLD one, about to be
+  // disposed by `index.ts`'s `resumeDriver`.
+  it('Esc during an in-flight resume does not call interrupt() on the retiring driver', async () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    const driver = fakeDriver()
+    let resolveResume: ((value: { driver: AppDriver; dispatcher: CommandDispatcher }) => void) | undefined
+    const onResume = vi.fn(
+      () =>
+        new Promise<{ driver: AppDriver; dispatcher: CommandDispatcher }>((resolve) => {
+          resolveResume = resolve
+        }),
+    )
+    const { stdin } = render(
+      <App store={store} driver={driver} dispatcher={buildDispatcher()} onQuit={vi.fn()} onResume={onResume} />,
+    )
+    await press(stdin, '/resume sess-1', '\r')
+    await settle()
+
+    stdin.write('\x1b')
+    await settle()
+    expect(driver.interruptCount).toBe(0)
+
+    resolveResume!({ driver: fakeDriver(), dispatcher: buildDispatcher() })
+    await settle()
+  })
 })

@@ -196,6 +196,141 @@ async function wireDriverObservers(ctx: Context, store: ZealStore, driver: ZealD
 }
 
 /**
+ * `/resume` restart, factored out of `bootZealTui` so it is directly
+ * unit-testable (an "assembly-level" test per this task's review) without
+ * mounting Ink — it only needs `ctx`/`store`/a live `ZealDriver`, exactly
+ * the fidelity level `tests/driver.test.ts` already exercises `ZealDriver`
+ * at.
+ *
+ * CRITICAL fix (Task 14 review): `store.reset(...)` MUST run before
+ * `ZealDriver.start()`, not after and not skipped. `store` is REUSED across
+ * a restart (so `App`'s existing `useSyncExternalStore` subscription keeps
+ * working), but a resumed session has its own independent `seq` counter
+ * starting back at 0 — without resetting, `ZealStore.apply`'s `seq <=
+ * lastSeq` guard would silently drop the resumed session's replayed seed
+ * (and any live event below the retiring session's high-water mark),
+ * because it looks identical to stale replay of already-applied events.
+ * See `store.ts`'s `reset()` doc for the full mechanics.
+ * @param ctx - the plugin context.
+ * @param store - the ONE store instance reused across the restart.
+ * @param retiringDriver - the driver being replaced; disposed before the replacement starts.
+ * @param sessionId - the persisted session id to resume.
+ * @param onQuit - forwarded into the fresh dispatcher's `/quit` local.
+ * @returns the fresh driver and dispatcher `App`/`bootZealTui` swap in.
+ */
+export async function resumeDriver(
+  ctx: Context,
+  store: ZealStore,
+  retiringDriver: ZealDriver,
+  sessionId: string,
+  onQuit: () => void,
+): Promise<{ driver: ZealDriver; dispatcher: CommandDispatcher }> {
+  await retiringDriver.dispose()
+  const defaultSelection = ctx.agentDefaultModel.currentSelection()
+  // Reset BEFORE start(): see the CRITICAL fix note above. `defaultSelection`
+  // is a reasonable initial status for the resumed session — the first
+  // `request/header` event (or, on this same tick, `ZealDriver.start`'s
+  // model-selection setup) will correct it if the resumed session actually
+  // used a different route/model.
+  store.reset({ provider: defaultSelection.provider, model: defaultSelection.model })
+  const driver = await ZealDriver.start(ctx, store, { resumeSessionId: sessionId })
+  const dispatcher = buildDispatcher(ctx, driver, onQuit)
+  await wireDriverObservers(ctx, store, driver)
+  return { driver, dispatcher }
+}
+
+/** Bounded wait: races `promise` against a `ms` timeout, resolving `undefined` (never rejecting) if either the timeout wins or `promise` itself rejects. */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | undefined> {
+  return new Promise((resolve) => {
+    let settled = false
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      resolve(undefined)
+    }, ms)
+    timer.unref?.()
+    promise.then(
+      (value) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        resolve(value)
+      },
+      () => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        resolve(undefined)
+      },
+    )
+  })
+}
+
+/**
+ * How long `performQuit` waits for `driver.agent.whenIdle()` after
+ * `interrupt()` before giving up and flushing anyway (IMPORTANT 3, Task 14
+ * review). A pragmatic v1 choice, not derived from any measured p99: long
+ * enough to let an in-flight tool call or the last few streamed tokens wrap
+ * up cleanly after `interrupt()` cancels the turn (so the durable log ends
+ * on a settled boundary rather than mid-stream), short enough that quitting
+ * on a truly stuck agent doesn't make double-Ctrl+C feel broken/hung.
+ * Deliberately not configurable — revisit with real usage data if it proves
+ * mistuned in either direction.
+ */
+export const QUIESCE_TIMEOUT_MS = 2000
+
+/** Structural subset of `ZealDriver` `performQuit` needs — kept narrow so its tests don't need a full `ZealDriver.start()`. */
+export interface QuitDriver {
+  interrupt(): void
+  flush(): Promise<void>
+  agent: { whenIdle(): Promise<void> }
+}
+
+export interface QuitDeps {
+  /** Unmount the Ink tree. A thunk (not the `Instance` itself) so a caller can defer to whatever `instance` currently holds. */
+  unmount(): void
+  driver: QuitDriver
+  restoreStdio(): void
+  /** `ctx.appExit` is itself optional on `Context` (`@deepseek-ai/dsh-cmdline`'s augmentation) — this mirrors that, called only if present. */
+  appExit: ((code: number) => void) | undefined
+}
+
+/**
+ * The on-quit sequence (per the brief, hardened per Task 14's review):
+ * unmount → interrupt the active turn and wait (bounded by
+ * `QUIESCE_TIMEOUT_MS`) for the agent to quiesce → flush → restore stdio →
+ * `appExit(0)`.
+ *
+ * IMPORTANT 2 fix: `restoreStdio`/`appExit` now run from a `finally`, so a
+ * rejecting `flush()` (or a `whenIdle()` that somehow rejects instead of
+ * just timing out) can never leave the process stuck mid-quit with stdio
+ * still redirected and no exit requested. The failure itself is logged
+ * (`console.error`) BEFORE `restoreStdio()` runs, while diagnostics are
+ * still redirected to the log file — logging after restore would send it to
+ * the now-torn-down terminal instead.
+ *
+ * IMPORTANT 3 fix: `driver.interrupt()` + a bounded `driver.agent.whenIdle()`
+ * wait now run before `flush()`, so the durable session log reflects a
+ * settled turn boundary rather than whatever was mid-flight when the user
+ * quit.
+ * @param deps - the driver and lifecycle callbacks this sequence drives.
+ * @param quiesceTimeoutMs - override for `QUIESCE_TIMEOUT_MS` (tests only).
+ */
+export async function performQuit(deps: QuitDeps, quiesceTimeoutMs: number = QUIESCE_TIMEOUT_MS): Promise<void> {
+  deps.unmount()
+  try {
+    deps.driver.interrupt()
+    await withTimeout(deps.driver.agent.whenIdle(), quiesceTimeoutMs)
+    await deps.driver.flush()
+  } catch (err) {
+    console.error('zeal-tui: quiesce/flush before quit failed:', err)
+  } finally {
+    deps.restoreStdio()
+    deps.appExit?.(0)
+  }
+}
+
+/**
  * The plugin entry point. Kicks off the async boot sequence and returns
  * immediately — Cordis plugin `apply()` is synchronous by contract, and the
  * boot work (loader await, agent creation, Ink mount) is all inherently
@@ -210,8 +345,9 @@ export function apply(ctx: Context, config: Config): void {
 /**
  * Sequence (per the brief): redirect diagnostics (done by `apply` before
  * this call) → build store → start driver → register answerers → mount
- * Ink (`exitOnCtrlC: false, patchConsole: false`) → on quit: unmount, await
- * `driver.flush()`, restore stdio, `ctx.appExit(0)`.
+ * Ink (`exitOnCtrlC: false, patchConsole: false`) → on quit: `performQuit`
+ * (unmount, quiesce, flush, restore stdio, `ctx.appExit(0)` — see its own
+ * doc for the review hardening).
  */
 async function bootZealTui(ctx: Context, restoreStdio: () => void): Promise<void> {
   try {
@@ -233,29 +369,28 @@ async function bootZealTui(ctx: Context, restoreStdio: () => void): Promise<void
     let dispatcher = buildDispatcher(ctx, driver, () => handleQuit())
     await wireDriverObservers(ctx, store, driver)
 
-    /** `/resume` restart: dispose the retiring driver (carry-forward 3), start the replacement, rebuild its dispatcher/observers. */
+    /** `/resume` restart — delegates to the standalone, unit-tested `resumeDriver`. */
     async function handleResume(sessionId: string): Promise<{ driver: AppDriver; dispatcher: CommandDispatcher }> {
-      await driver.dispose()
-      driver = await ZealDriver.start(ctx, store, { resumeSessionId: sessionId })
-      dispatcher = buildDispatcher(ctx, driver, () => handleQuit())
-      await wireDriverObservers(ctx, store, driver)
-      return { driver, dispatcher }
+      const next = await resumeDriver(ctx, store, driver, sessionId, () => handleQuit())
+      driver = next.driver
+      dispatcher = next.dispatcher
+      return next
     }
 
     let quitting = false
     let instance: Instance | undefined
 
     function handleQuit(): void {
-      void quit()
-    }
-
-    async function quit(): Promise<void> {
+      // IMPORTANT 2/3 re-entry guard stays here (a stateful concern of this
+      // closure); the actual sequence lives in the standalone `performQuit`.
       if (quitting) return
       quitting = true
-      instance?.unmount()
-      await driver.flush()
-      restoreStdio()
-      ctx.appExit?.(0)
+      void performQuit({
+        unmount: () => instance?.unmount(),
+        driver,
+        restoreStdio,
+        appExit: ctx.appExit,
+      })
     }
 
     // `createElement`, not JSX: this file is `.ts` (per the brief's file

@@ -45,6 +45,21 @@ import type {
 const NOTIFY_COALESCE_MS = 16
 
 /**
+ * Rejection reason for any interaction still queued when `ZealStore.reset()`
+ * runs — e.g. an approval prompt from a session that is being torn down for
+ * a `/resume` restart. Distinct from a `signal`-aborted rejection so a
+ * caller (like `answerers.ts`'s approval listener) can tell "the whole
+ * session reset out from under this request" apart from "the user/agent
+ * explicitly cancelled it" if it ever needs to.
+ */
+export class ZealStoreResetError extends Error {
+  constructor() {
+    super('ZealStore was reset while this interaction was still pending')
+    this.name = 'ZealStoreResetError'
+  }
+}
+
+/**
  * One queued `askApproval`/`askQuestions` request. `resolve`/`reject` are the
  * executor functions of the promise handed back to the caller; `signal`/
  * `onAbort` are only present when the caller passed an `AbortSignal`, so the
@@ -115,6 +130,46 @@ export class ZealStore {
   /** Merge a partial patch into the status-bar model. */
   setStatus(patch: Partial<StatusModel>): void {
     this.state = { ...this.state, status: { ...this.state.status, ...patch } }
+    this.scheduleNotify()
+  }
+
+  /**
+   * Reset transcript/live/interaction state back to a fresh store's
+   * baseline, so ONE `ZealStore` instance can be reused across a driver
+   * restart (`/resume`) instead of needing a brand-new store (and a fresh
+   * `App`/`useSyncExternalStore` subscription) every time.
+   *
+   * CRITICAL: a resumed session has its OWN independent `seq` counter
+   * starting back at 0 — `Session.seq` is per-session log length, not a
+   * global counter. Without resetting `lastSeq` to `-1`, `apply`'s
+   * `seq <= lastSeq` guard would silently drop the ENTIRE reused-store
+   * scenario: the resumed session's replayed seed (and any live event below
+   * the retiring session's high-water mark) would look like stale replay of
+   * events already applied, when they are actually a completely different
+   * session's events that merely happen to reuse low seq numbers. This is
+   * exactly the bug this method exists to fix — callers restarting a driver
+   * (see `index.ts`'s `resumeDriver`) MUST call this BEFORE the replacement
+   * `ZealDriver.start()`, not after.
+   *
+   * Any still-queued interaction (an approval/questions prompt the RETIRING
+   * session's agent posed) is rejected with a `ZealStoreResetError` rather
+   * than silently dropped, so a caller still awaiting
+   * `askApproval`/`askQuestions` observes a definite outcome instead of
+   * hanging forever.
+   * @param initialStatus - the fresh provider/model to seed `status` with — any
+   *   stale `title`/`sandboxMode`/`retry`/`contextFill` from the retiring
+   *   session is deliberately dropped, not carried over.
+   */
+  reset(initialStatus: { provider: string; model: string }): void {
+    for (const entry of this.interactionQueue.splice(0, this.interactionQueue.length)) {
+      if (entry.signal && entry.onAbort) entry.signal.removeEventListener('abort', entry.onAbort)
+      entry.reject(new ZealStoreResetError())
+    }
+    this.lastSeq = -1
+    this.state = {
+      settled: [],
+      status: { provider: initialStatus.provider, model: initialStatus.model, running: false },
+    }
     this.scheduleNotify()
   }
 

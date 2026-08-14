@@ -1,6 +1,6 @@
 import fc from 'fast-check'
 import { describe, expect, it } from 'vitest'
-import { ZealStore } from '../src/tui/store.ts'
+import { ZealStore, ZealStoreResetError } from '../src/tui/store.ts'
 import { eventSequence } from './fixtures/arbitraries.ts'
 import { fixtures } from './fixtures/events.ts'
 
@@ -214,6 +214,68 @@ describe('ZealStore public API', () => {
       title: 'building',
       contextFill: 0.42,
     })
+  })
+
+  it('reset() clears settled/live and re-seeds status from the given provider/model, dropping stale status fields', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    store.apply(fixtures.turnStart(1))
+    store.apply(fixtures.textChunk('partial', 2))
+    store.apply(fixtures.userMessage('hello', 3))
+    store.setStatus({ title: 'old session title', sandboxMode: 'sandboxed', retry: 'retry 1/3', contextFill: 0.9 })
+    expect(store.getState().settled.length).toBeGreaterThan(0)
+
+    store.reset({ provider: 'zai-coding-cn', model: 'glm-4.7' })
+
+    expect(store.getState()).toEqual({
+      settled: [],
+      status: { provider: 'zai-coding-cn', model: 'glm-4.7', running: false },
+    })
+  })
+
+  // CRITICAL 1 (Task 14 review): the whole reason `reset()` exists — a
+  // resumed session's `seq` counter starts back at 0, independent of the
+  // retiring session's. Without resetting `lastSeq`, the guard in `apply()`
+  // would treat the resumed session's low seqs as stale replay and drop them.
+  it('reset() rewinds lastSeq so a subsequent apply() at a LOWER seq than before reset is not dropped as stale', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    store.apply(fixtures.turnStart(5))
+    store.apply(fixtures.userMessage('from the retiring session', 6))
+    expect(store.getState().settled).toHaveLength(1)
+
+    store.reset({ provider: 'zai', model: 'glm-5.2' })
+
+    // A resumed session's seed starts back at seq 0 — lower than 6, the
+    // retiring session's high-water mark. Pre-fix, `apply`'s `seq <=
+    // lastSeq` guard (still at 6) would silently drop this.
+    store.apply(fixtures.turnStart(0))
+    store.apply(fixtures.userMessage('from the resumed session', 1))
+    const settled = store.getState().settled
+    expect(settled).toHaveLength(1)
+    expect(settled[0]).toMatchObject({ text: 'from the resumed session' })
+  })
+
+  it('reset() rejects any still-queued interaction with ZealStoreResetError and clears state.interaction', async () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    const pending = store.askApproval({ title: 'Allow?', detail: '', agentLabel: 'main' })
+    expect(store.getState().interaction).toBeDefined()
+
+    store.reset({ provider: 'zai', model: 'glm-5.2' })
+
+    await expect(pending).rejects.toBeInstanceOf(ZealStoreResetError)
+    expect(store.getState().interaction).toBeUndefined()
+  })
+
+  it('reset() lets a fresh interaction be queued afterward (the queue itself is usable again, not just cleared)', async () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    const staleApproval = store.askApproval({ title: 'stale', detail: '', agentLabel: 'main' })
+    store.reset({ provider: 'zai', model: 'glm-5.2' })
+    await expect(staleApproval).rejects.toBeInstanceOf(ZealStoreResetError)
+
+    const fresh = store.askApproval({ title: 'fresh', detail: '', agentLabel: 'main' })
+    const interaction = store.getState().interaction
+    expect(interaction).toMatchObject({ kind: 'approval', title: 'fresh' })
+    store.resolveInteraction((interaction as { id: number }).id, 'allow-once')
+    await expect(fresh).resolves.toBe('allow-once')
   })
 
   it('coalesces subscribe notifications within ~16ms and stops after unsubscribe', async () => {

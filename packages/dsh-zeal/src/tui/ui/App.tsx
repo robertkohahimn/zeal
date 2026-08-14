@@ -65,6 +65,18 @@
  * it from the rendered frame without unmounting it — `display: none` alone
  * would NOT stop its keyboard listeners (Ink's `useInput` isActive is the
  * only thing that does), which is why both are used together.
+ *
+ * REVIEW FIX ROUND (post-Task 14 review): two additional hardenings beyond
+ * the original assembly. IMPORTANT 4 — `dispatcher.dispatch(line)` can
+ * reject (a throwing seam command), so `handleSubmit`'s dispatch branch now
+ * carries a `.catch` that renders the failure as an error notice instead of
+ * leaving an unhandled promise rejection. IMPORTANT 5 — `performResume` is
+ * guarded against re-entry with a `ref` (not just `resuming` state, which
+ * batches and would not catch a same-tick double-call — see its own comment
+ * below), and `editorInert`/the Esc handler both extend to the WHOLE resume
+ * await window, not just while the picker is visibly open, so neither a
+ * submitted line nor an Esc-triggered `interrupt()` can reach the driver
+ * reference while it is mid-swap/mid-dispose.
  * @module @zealagent/dsh-zeal/tui/ui/App
  */
 import { Box, Text, useInput, useWindowSize } from 'ink'
@@ -137,6 +149,10 @@ export function App(props: AppProps): JSX.Element {
   const [dispatcher, setDispatcher] = useState<CommandDispatcher>(props.dispatcher)
   const [picker, setPicker] = useState<PickerState | undefined>(undefined)
   const [ctrlCHint, setCtrlCHint] = useState(false)
+  // Mirrors `resumingRef` below for rendering (editor inertness, `<Box
+  // display>`) — see IMPORTANT 5's fix note on why the ref, not this state,
+  // is the actual re-entry guard.
+  const [resuming, setResuming] = useState(false)
 
   const lastCtrlCAtRef = useRef<number | undefined>(undefined)
   const ctrlCTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
@@ -144,12 +160,31 @@ export function App(props: AppProps): JSX.Element {
     if (ctrlCTimerRef.current !== undefined) clearTimeout(ctrlCTimerRef.current)
   }, [])
 
+  // IMPORTANT 5 fix: the SYNCHRONOUS re-entry guard for `performResume`.
+  // `resuming` (React state) is NOT enough on its own — React batches state
+  // updates, so two `onSelect`/`handleSubmit` calls landing in the same
+  // synchronous tick (e.g. a same-tick keystroke burst selecting two picker
+  // rows before React has a chance to re-render and unmount the picker,
+  // exactly the "Same-tick bursts" hazard `InputEditor.tsx`'s module doc
+  // documents for a different component) would both see the PRE-update
+  // `resuming === false` and both proceed. A `ref` is read/written
+  // synchronously with no batching, so the second call in a same-tick burst
+  // correctly observes the first call's guard.
+  const resumingRef = useRef(false)
+
   const { columns } = useWindowSize()
   const width = Math.max(1, columns || DEFAULT_WIDTH)
 
-  const editorInert = state.interaction !== undefined || picker !== undefined
+  // IMPORTANT 5 fix: inert (not just hidden) for the ENTIRE resume await,
+  // not only while the picker is visibly open — otherwise a line typed and
+  // submitted during the `onResume` await could still reach `driver.send()`
+  // on the OLD driver right as (or after) `index.ts` disposes it.
+  const editorInert = state.interaction !== undefined || picker !== undefined || resuming
 
   async function performResume(sessionId: string): Promise<void> {
+    if (resumingRef.current) return // a resume is already in flight — ignore
+    resumingRef.current = true
+    setResuming(true)
     setPicker(undefined)
     try {
       const next = await onResume(sessionId)
@@ -160,10 +195,14 @@ export function App(props: AppProps): JSX.Element {
       // Carry-forward 5: a resume rejection (e.g. `/resume <bad-id>`) must
       // render as an error notice, never crash the TUI.
       store.addNotice('error', `Failed to resume session ${sessionId}: ${errorText(err)}`)
+    } finally {
+      resumingRef.current = false
+      setResuming(false)
     }
   }
 
   async function openResumePicker(): Promise<void> {
+    if (resumingRef.current) return // don't open a picker mid-restart
     try {
       const rows = await driver.listSessions()
       setPicker({ rows })
@@ -181,9 +220,15 @@ export function App(props: AppProps): JSX.Element {
         else void openResumePicker()
         return
       }
-      void dispatcher.dispatch(line).then((outcome) => {
+      // IMPORTANT 4 fix: `dispatch()` can reject (a throwing seam command,
+      // e.g. `ctx.commands.execute` itself throwing) — without a `.catch`
+      // here that becomes an unhandled promise rejection, which crashes the
+      // process rather than surfacing as a normal in-TUI error.
+      dispatcher.dispatch(line).then((outcome) => {
         if (outcome.uiText !== undefined) store.addNotice('info', outcome.uiText)
         else if (!outcome.handled) store.addNotice('error', `Unknown command: ${line}`)
+      }).catch((err: unknown) => {
+        store.addNotice('error', `Command failed: ${errorText(err)}`)
       })
       return
     }
@@ -211,6 +256,10 @@ export function App(props: AppProps): JSX.Element {
       return
     }
     if (key.escape) {
+      // IMPORTANT 5 fix: never call `driver.interrupt()` on a driver that
+      // may be mid-dispose (the resume await window) — the OLD driver
+      // reference is still what `driver` holds until the swap lands.
+      if (resuming) return
       if (picker !== undefined) {
         setPicker(undefined)
         return
