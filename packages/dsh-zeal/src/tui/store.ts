@@ -169,7 +169,7 @@ export class ZealStore {
           for (const tool of live.tools) {
             settled = [...settled, { ...tool, seq: e.seq }]
           }
-          if (live.text !== '') {
+          if (live.text !== '' || live.reasoning !== '') {
             const trailing: AssistantEntry = { kind: 'assistant', seq: e.seq, text: live.text, reasoning: live.reasoning }
             settled = [...settled, trailing]
           }
@@ -185,12 +185,17 @@ export class ZealStore {
       }
 
       case 'request-header': {
-        this.state = { ...this.state, status: { ...this.state.status, provider: e.provider, model: e.model } }
+        this.setStatus({ provider: e.provider, model: e.model })
         return
       }
 
       case 'other':
         return
+
+      default: {
+        const exhaustive: never = e
+        return exhaustive
+      }
     }
   }
 }

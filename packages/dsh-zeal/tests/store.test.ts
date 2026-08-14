@@ -94,6 +94,17 @@ describe('ZealStore fold semantics', () => {
     expect(store.getState().settled).toEqual([])
   })
 
+  it('turn-end settles trailing reasoning-only live content, not just text (Finding 1 regression)', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    store.apply(fixtures.turnStart(1))
+    store.apply(fixtures.reasoningChunk('still thinking', 2))
+    store.apply(fixtures.turnEnd('aborted', 3))
+    expect(store.getState().settled).toEqual([
+      { kind: 'assistant', seq: 3, text: '', reasoning: 'still thinking' },
+      { kind: 'notice', seq: 3, level: 'info', text: 'turn interrupted' },
+    ])
+  })
+
   it('turn-end with an error outcome adds a NoticeEntry carrying the error message', () => {
     const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
     store.apply(fixtures.turnStart(1))
@@ -124,6 +135,55 @@ describe('ZealStore fold semantics', () => {
     store.apply(fixtures.textChunk('a', 2)) // exact duplicate seq
     store.apply(fixtures.reasoningChunk('x', 1)) // lower seq
     expect(store.getState()).toEqual(snapshot)
+  })
+})
+
+describe('ZealStore fold interleavings (review findings)', () => {
+  it('a tool-result with no matching call is a safe no-op, settled unchanged', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    store.apply(fixtures.turnStart(1))
+    store.apply(fixtures.toolResult('unknown_call', false, 'ignored', 2))
+    const state = store.getState()
+    expect(state.settled).toEqual([])
+    expect(state.live).toEqual({ text: '', reasoning: '', tools: [] })
+  })
+
+  it('deltas, tool-call, and tool-result arriving before any turn-start are no-ops', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    store.apply(fixtures.textChunk('a', 1))
+    store.apply(fixtures.reasoningChunk('b', 2))
+    store.apply(fixtures.toolCall('call_1', 'bash', '{}', 3))
+    store.apply(fixtures.toolResult('call_1', false, 'out', 4))
+    const state = store.getState()
+    expect(state.live).toBeUndefined()
+    expect(state.settled).toEqual([])
+  })
+
+  it('assistant-message mid-turn leaves still-running tools untouched in live.tools', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    store.apply(fixtures.turnStart(1))
+    store.apply(fixtures.toolCall('call_1', 'bash', '{}', 2))
+    store.apply(fixtures.assistantMessage('interim', 'thinking', 3))
+    const state = store.getState()
+    expect(state.live?.tools).toEqual([
+      { kind: 'tool', seq: 2, callId: 'call_1', name: 'bash', args: '{}', status: 'running', preview: '' },
+    ])
+    expect(state.settled).toEqual([{ kind: 'assistant', seq: 3, text: 'interim', reasoning: 'thinking' }])
+  })
+
+  it('resolving one of two concurrently running tools leaves the sibling running in live.tools', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    store.apply(fixtures.turnStart(1))
+    store.apply(fixtures.toolCall('call_1', 'bash', '{}', 2))
+    store.apply(fixtures.toolCall('call_2', 'edit', '{}', 3))
+    store.apply(fixtures.toolResult('call_1', false, 'done', 4))
+    const state = store.getState()
+    expect(state.live?.tools).toEqual([
+      { kind: 'tool', seq: 3, callId: 'call_2', name: 'edit', args: '{}', status: 'running', preview: '' },
+    ])
+    expect(state.settled).toEqual([
+      { kind: 'tool', seq: 4, callId: 'call_1', name: 'bash', args: '{}', status: 'ok', preview: 'done' },
+    ])
   })
 })
 
