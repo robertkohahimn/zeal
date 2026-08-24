@@ -33,6 +33,7 @@ import {
   NON_TTY_MESSAGE,
   onboardingNotice,
   performQuit,
+  performCrashExit,
   resumeDriver,
   wireDriverObservers,
 } from '../src/tui/index.ts'
@@ -208,6 +209,92 @@ describe('performQuit', () => {
     // interrupt/whenIdle/flush never ran — unmount threw before reaching them.
     expect(order).toEqual([])
     expect(consoleError).toHaveBeenCalled()
+    consoleError.mockRestore()
+  })
+})
+
+// Regression coverage for the CodeRabbit review finding: `bootZealTui`'s
+// try/catch only wraps the SYNCHRONOUS `render()` call, so a React error
+// boundary firing after mount never reached it. Ink reports that case by
+// rejecting `instance.waitUntilExit()` — and suppresses the global
+// unhandled-rejection warning for that promise itself — so without an
+// explicit handler a crashed render left the driver running, stdio still
+// redirected into the log file, and the process never exiting nonzero.
+describe('performCrashExit (post-mount render failure)', () => {
+  it('quiesces and flushes, restores stdio, then exits NONZERO', async () => {
+    const order: string[] = []
+    const driver: FakeQuitDriver = {
+      interrupt: () => order.push('interrupt'),
+      flush: async () => { order.push('flush') },
+      agent: { whenIdle: async () => { order.push('whenIdle') } },
+    }
+    const appExitCalls: number[] = []
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    await performCrashExit({
+      unmount: () => order.push('unmount'),
+      driver,
+      restoreStdio: () => order.push('restoreStdio'),
+      appExit: (code) => appExitCalls.push(code),
+    }, new Error('render boom'))
+    expect(order).toEqual(['unmount', 'interrupt', 'whenIdle', 'flush', 'restoreStdio'])
+    expect(appExitCalls).toEqual([1])
+    consoleError.mockRestore()
+  })
+
+  it('reports the error AFTER restoreStdio, so it reaches the real terminal', async () => {
+    const order: string[] = []
+    const driver: FakeQuitDriver = {
+      interrupt: () => {},
+      flush: async () => {},
+      agent: { whenIdle: async () => {} },
+    }
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => { order.push('print') })
+    await performCrashExit({
+      unmount: () => {},
+      driver,
+      restoreStdio: () => order.push('restoreStdio'),
+      appExit: () => {},
+    }, new Error('render boom'))
+    expect(order).toEqual(['restoreStdio', 'print'])
+    expect(consoleError).toHaveBeenCalledWith('zeal-tui crashed:', expect.any(Error))
+    consoleError.mockRestore()
+  })
+
+  it('still restores stdio and exits 1 when the cleanup itself throws', async () => {
+    const restoreCalls: number[] = []
+    const appExitCalls: number[] = []
+    const driver: FakeQuitDriver = {
+      interrupt: () => {},
+      flush: async () => { throw new Error('flush boom') },
+      agent: { whenIdle: async () => {} },
+    }
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    await performCrashExit({
+      unmount: () => { throw new Error('unmount boom') },
+      driver,
+      restoreStdio: () => restoreCalls.push(1),
+      appExit: (code) => appExitCalls.push(code),
+    }, new Error('render boom'))
+    expect(restoreCalls).toEqual([1])
+    expect(appExitCalls).toEqual([1])
+    consoleError.mockRestore()
+  })
+
+  it('tolerates appExit being undefined (it is optional on Context)', async () => {
+    const restoreCalls: number[] = []
+    const driver: FakeQuitDriver = {
+      interrupt: () => {},
+      flush: async () => {},
+      agent: { whenIdle: async () => {} },
+    }
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    await expect(
+      performCrashExit(
+        { unmount: () => {}, driver, restoreStdio: () => restoreCalls.push(1), appExit: undefined },
+        new Error('render boom'),
+      ),
+    ).resolves.toBeUndefined()
+    expect(restoreCalls).toEqual([1])
     consoleError.mockRestore()
   })
 })

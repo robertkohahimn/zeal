@@ -36,6 +36,18 @@ describe('package.json exports map .d.ts paths exist after build (I7, Ruling R6)
   const declared = declaredTypesPaths(packageJson.exports as Record<string, unknown>)
 
   beforeAll(() => {
+    // `ZEAL_SKIP_BUILD` is the cross-process build coordination hatch that
+    // `tests/composition/helpers.ts` documents: build `lib/` ONCE up front,
+    // then set it so no Vitest worker touches `lib/` again. Vitest runs test
+    // files in parallel worker processes by default (no `fileParallelism:
+    // false` in the root `vitest.config.ts`), and this file plus the three
+    // composition files all target the SAME `packages/dsh-zeal/lib` output —
+    // so a `tsdown` started here can land its "Cleaning N files" step in the
+    // middle of another worker's `pnpm pack`. Honouring the same flag here
+    // is what actually makes that hatch airtight; without it this hook
+    // silently starts the very second concurrent build the flag was set to
+    // prevent.
+    if (process.env['ZEAL_SKIP_BUILD']) return
     const anyMissing = declared.some((relativePath) => !existsSync(join(packageRoot, relativePath)))
     if (anyMissing) {
       const build = spawnSync('pnpm', ['run', 'build'], { cwd: packageRoot, stdio: 'inherit' })
@@ -50,8 +62,12 @@ describe('package.json exports map .d.ts paths exist after build (I7, Ruling R6)
   })
 
   it('every declared .d.ts export path exists on disk after build', () => {
+    const skipped = Boolean(process.env['ZEAL_SKIP_BUILD'])
     for (const relativePath of declared) {
-      expect(existsSync(join(packageRoot, relativePath)), `expected ${relativePath} to exist`).toBe(true)
+      const hint = skipped
+        ? `expected ${relativePath} to exist (ZEAL_SKIP_BUILD is set, so this test did not build — run \`pnpm --filter @zealagent/dsh-zeal run build\` first)`
+        : `expected ${relativePath} to exist`
+      expect(existsSync(join(packageRoot, relativePath)), hint).toBe(true)
     }
   })
 })

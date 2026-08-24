@@ -243,6 +243,53 @@ describe('InteractionPanel — plan review', () => {
     stdin.write('a')
     expect(onResolve).toHaveBeenCalledWith(7, [{ id: 'plan', selected: ['Option 1'] }])
   })
+
+  // Regression coverage for the CodeRabbit review finding: `findRejectOption`
+  // used to fall back to the APPROVE option when no other option existed, so
+  // `[r]` on a single-option plan review submitted the approve label — a
+  // rejection silently recorded as consent. There is no option that means
+  // "reject" here, so the only correct answer is an empty selection (the
+  // shape `mapAnswers` already documents for a skipped item).
+  it('"r" on a single-option item submits an EMPTY selection, never the approve label', () => {
+    const singleOptionPrompt: QuestionsPrompt = {
+      kind: 'questions',
+      id: 8,
+      items: [
+        {
+          id: 'plan',
+          question: 'Approve this plan?',
+          options: [{ label: 'Approve plan' }],
+          multiSelect: false,
+          planReview: true,
+        },
+      ],
+    }
+    const onResolve = vi.fn()
+    const { stdin } = render(<InteractionPanel interaction={singleOptionPrompt} onResolve={onResolve} />)
+    stdin.write('r')
+    expect(onResolve).toHaveBeenCalledWith(8, [{ id: 'plan', selected: [] }])
+    expect(onResolve).not.toHaveBeenCalledWith(8, [{ id: 'plan', selected: ['Approve plan'] }])
+  })
+
+  it('"a" on that same single-option item still approves', () => {
+    const singleOptionPrompt: QuestionsPrompt = {
+      kind: 'questions',
+      id: 9,
+      items: [
+        {
+          id: 'plan',
+          question: 'Approve this plan?',
+          options: [{ label: 'Approve plan' }],
+          multiSelect: false,
+          planReview: true,
+        },
+      ],
+    }
+    const onResolve = vi.fn()
+    const { stdin } = render(<InteractionPanel interaction={singleOptionPrompt} onResolve={onResolve} />)
+    stdin.write('a')
+    expect(onResolve).toHaveBeenCalledWith(9, [{ id: 'plan', selected: ['Approve plan'] }])
+  })
 })
 
 // Regression coverage for the fix-round-1 review finding: Ink coalesces

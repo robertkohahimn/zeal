@@ -229,15 +229,23 @@ function findApproveOption(options: readonly QuestionOption[]): QuestionOption |
   return options.find((option) => APPROVE_LABEL_RE.test(option.label)) ?? options[0]
 }
 
-/** See module doc comment for the disambiguation policy this implements. */
+/**
+ * See module doc comment for the disambiguation policy this implements.
+ *
+ * Deliberately has NO fall-back to `approve`: when the item offers nothing
+ * but the approve pick there is no way to express "reject", and returning
+ * `approve` here would make `[r]` submit the approve label — a rejection
+ * silently recorded as consent. The caller instead submits `selected: []`
+ * (the shape `mapAnswers` documents for a skipped item), which the seam
+ * reads as "no option chosen" rather than as approval.
+ */
 function findRejectOption(
   options: readonly QuestionOption[],
   approve: QuestionOption | undefined,
 ): QuestionOption | undefined {
   return (
     options.find((option) => option !== approve && REJECT_LABEL_RE.test(option.label)) ??
-    options.find((option) => option !== approve) ??
-    approve
+    options.find((option) => option !== approve)
   )
 }
 

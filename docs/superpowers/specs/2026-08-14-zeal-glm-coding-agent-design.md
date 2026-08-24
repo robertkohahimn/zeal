@@ -337,7 +337,16 @@ answerers give them their interactive surface.
   environment (verified in `mcp-client/src/transport.ts`).
 - Telemetry off. Exact pins + lockfile; launcher installs only named packages.
 - The gauntlet's auto-approve overlay (§6.5) is test infrastructure, **never
-  shipped in the bundle**, and runs in a disposable container.
+  shipped in the bundle**. Its isolation is a disposable scratch `DSH_HOME`
+  and scratch work directory (`mktemp -d`, removed on exit), plus dsh's own
+  sandbox and the `code-runtime-worker-thread` boundary — **not** a
+  container. Because `gauntlet-runner.ts` answers every `approval/request`
+  with `allowed-once`, model-driven tool calls run unsupervised with the
+  invoking user's own host privileges; the scratch directories bound where
+  the task is *meant* to write, not what the process *can* reach. Run the
+  gauntlet only on tasks and models you are willing to give that level of
+  access, and treat a containerized runner as the hardening step to take
+  before running it unattended or against untrusted task content.
 
 ## 6. Verification — five layers, cheapest first
 

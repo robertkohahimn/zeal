@@ -50,6 +50,15 @@ Useful flags, parsed by the bundle's `zeal-startup` plugin
 - `--model <id>` — set the initial model id on the default route
 - `--help` — dsh/commander help
 
+In-session slash commands:
+
+- `/model <id> [provider]` — switch the active model, and optionally the
+  route it runs on (see [Self-hosted GLM](#self-hosted-glm-vllm--sglang) for
+  when the second argument matters)
+- `/resume` — pick a persisted session to resume
+- `/help` — list available commands
+- `/quit` — quiesce the active turn, flush the session, and exit
+
 ### API keys
 
 Zeal ships two GLM routes and needs a key for whichever one you use:
@@ -60,10 +69,26 @@ Zeal ships two GLM routes and needs a key for whichever one you use:
 | `zai-coding-cn` | open.bigmodel.cn coding endpoint | `ZHIPU_API_KEY` |
 
 Set the appropriate variable in your environment, or add it to the
-owner-only, hot-reloaded `$DSH_HOME/.credentials.yaml` file — keys are never
-read from `cordis.patch.yml` or `settings.yaml`, and never written to logs.
-If the first request fails with a missing-credential error, the TUI shows an
-onboarding panel naming the exact variable to set instead of a raw error.
+owner-only, hot-reloaded `$DSH_HOME/.credentials.yaml` file. Keys are never
+read from `cordis.patch.yml` (a committed file — never put a key there) and
+never written to logs. If the first request fails with a missing-credential
+error, the TUI shows an onboarding panel naming the exact variable to set
+instead of a raw error.
+
+**`settings.yaml` and key material.** A `llm-pi-ai:` section in
+`$DSH_HOME/settings.yaml` deep-merges per route over Zeal's own route config
+(see [Settings precedence](#settings-precedence)), so a key set on a route
+there *is* honored — this is the third path the onboarding panel mentions.
+Prefer the environment variable or `.credentials.yaml` anyway:
+
+- `settings.yaml` is **home-level and shared across every profile** on the
+  machine, so a key there is not scoped to `zeal`.
+- Unlike `.credentials.yaml`, it is a general settings file and is not
+  treated as a secret store. If you do put a key in it, restrict it
+  yourself: `chmod 600 "$DSH_HOME/settings.yaml"`.
+- The route-level `apiKeyEnv` field is the better `settings.yaml` override:
+  it names a *different environment variable* to read the key from, which
+  keeps the key itself out of the file entirely.
 
 ## Manual install
 
@@ -152,6 +177,29 @@ under that key), so the profile must supply the whole provider: endpoint,
 protocol, and model list. `compat.thinkingFormat: zai` tells the adapter how
 GLM's reasoning traces travel over the wire, since a self-hosted URL gives it
 no endpoint to guess the dialect from.
+
+**Declaring the route does not select it.** The block above only *adds*
+`zai-self-hosted` to the provider map; the default selection still points at
+the shipped `zai` route, and `--model <id>` changes only the model id on
+whatever route is already selected — not the route itself. Pick one of:
+
+- **Per session** — switch at the prompt, provider included:
+
+  ```
+  /model glm-5.2 zai-self-hosted
+  ```
+
+- **Persistently** — also override the default selection in your
+  `cordis.patch.yml`, so every new session starts on the self-hosted route:
+
+  ```yaml
+  - id: agent-default-model
+    config:
+      provider: zai-self-hosted
+      model: glm-5.2
+  ```
+
+  A patch row replaces that row's whole config, so restate both fields.
 
 ## Re-enabling web search
 

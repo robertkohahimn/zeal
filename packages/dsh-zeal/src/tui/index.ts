@@ -397,6 +397,52 @@ export async function performQuit(deps: QuitDeps, quiesceTimeoutMs: number = QUI
   }
 }
 
+/**
+ * The POST-MOUNT crash counterpart to `performQuit`: same quiesce → flush →
+ * restore-stdio sequence, but it reports `err` and exits NONZERO (spec §3.5:
+ * "If the TUI throws: print a plain-text error, flush sessions, exit
+ * nonzero").
+ *
+ * Needed because `bootZealTui`'s try/catch only covers the SYNCHRONOUS
+ * `render()` call. Once Ink has mounted, a React error-boundary failure is
+ * reported by Ink calling `unmount(error)`, which rejects the promise from
+ * `instance.waitUntilExit()` — not by throwing anywhere `bootZealTui` can
+ * see. Ink suppresses the global unhandled-rejection warning for that
+ * promise internally, so without an explicit rejection handler a crashed
+ * render is completely silent: the driver keeps running, stdio stays
+ * redirected to the log file, and the process never exits nonzero.
+ *
+ * `deps.unmount()` is still called (inside the try, per `performQuit`'s M9
+ * rationale) even though Ink has already torn itself down on this path —
+ * Ink's own `unmount` is a no-op once unmounted, and routing every exit
+ * through the same sequence keeps the two paths from drifting.
+ *
+ * The error is printed AFTER `restoreStdio()` so it reaches the real
+ * terminal rather than the diagnostics log the TUI redirected stdio into —
+ * the same ordering `bootZealTui`'s pre-mount catch already uses.
+ * @param deps - the driver and lifecycle callbacks this sequence drives.
+ * @param err - the post-mount failure to report.
+ * @param quiesceTimeoutMs - override for `QUIESCE_TIMEOUT_MS` (tests only).
+ */
+export async function performCrashExit(
+  deps: QuitDeps,
+  err: unknown,
+  quiesceTimeoutMs: number = QUIESCE_TIMEOUT_MS,
+): Promise<void> {
+  try {
+    deps.unmount()
+    deps.driver.interrupt()
+    await withTimeout(deps.driver.agent.whenIdle(), quiesceTimeoutMs)
+    await deps.driver.flush()
+  } catch (cleanupErr) {
+    console.error('zeal-tui: quiesce/flush after render failure failed:', cleanupErr)
+  } finally {
+    deps.restoreStdio()
+    console.error('zeal-tui crashed:', err)
+    deps.appExit?.(1)
+  }
+}
+
 /** The exact plain-text message M11 (final-review fix wave) specifies for a non-TTY boot attempt. */
 export const NON_TTY_MESSAGE = 'zeal requires an interactive terminal (TTY)'
 
@@ -449,6 +495,16 @@ export function apply(ctx: Context, config: Config): void {
  * Ink (`exitOnCtrlC: false, patchConsole: false`) → on quit: `performQuit`
  * (unmount, quiesce, flush, restore stdio, `ctx.appExit(0)` — see its own
  * doc for the review hardening).
+ *
+ * Two distinct failure paths, because `render()` only throws for failures
+ * that happen synchronously during the mount:
+ *  - PRE-mount (anything up to and including `render()` returning) — the
+ *    `catch` at the bottom of this function; nothing is mounted, so it just
+ *    restores stdio, prints, and exits 1.
+ *  - POST-mount (a React error boundary firing later) — the
+ *    `waitUntilExit()` rejection handler, which routes into
+ *    `performCrashExit` so the driver is still quiesced and flushed. See
+ *    that function's doc for why Ink makes this the only observable signal.
  */
 async function bootZealTui(ctx: Context, restoreStdio: () => void): Promise<void> {
   try {
@@ -504,6 +560,21 @@ async function bootZealTui(ctx: Context, restoreStdio: () => void): Promise<void
       createElement(App, { store, driver, dispatcher, onQuit: handleQuit, onResume: handleResume }),
       { exitOnCtrlC: false, patchConsole: false },
     )
+
+    // Post-mount failures never reach the catch below (see
+    // `performCrashExit`'s doc): Ink surfaces them by rejecting this
+    // promise. `handleQuit`'s re-entry guard is reused so a crash arriving
+    // during an in-flight quit does not run the teardown sequence twice.
+    instance.waitUntilExit().catch((err: unknown) => {
+      if (quitting) return
+      quitting = true
+      void performCrashExit({
+        unmount: () => instance?.unmount(),
+        driver,
+        restoreStdio,
+        appExit: ctx.appExit,
+      }, err)
+    })
   } catch (err) {
     // Spec §3.5: "If the TUI throws: print a plain-text error, flush
     // sessions, exit nonzero." Nothing mounted yet (or mounting itself

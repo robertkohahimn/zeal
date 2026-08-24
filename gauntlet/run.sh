@@ -75,9 +75,12 @@ echo "gauntlet/run.sh: scratch DSH_HOME=$DSH_HOME_DIR"
 echo "gauntlet/run.sh: scratch workdir=$WORKDIR"
 
 # --- 1. Build + pack the bundle --------------------------------------------
-# `pnpm pack` only ships what's on disk under package.json's "files" globs;
-# it does not invoke the build script itself, so lib/ has to be fresh first
-# (same constraint helpers.ts's buildBundle() documents).
+# `pnpm pack --ignore-scripts` only ships what's on disk under package.json's
+# "files" globs, so lib/ has to be fresh first (same constraint helpers.ts's
+# buildBundle() documents). `--ignore-scripts` suppresses the package's own
+# `prepack` build hook, which exists for PUBLISHING (so a released tarball is
+# never empty) — here the build is this script's own step, gated on
+# ZEAL_SKIP_BUILD so a caller that already built is not made to build twice.
 if [[ -z "${ZEAL_SKIP_BUILD:-}" ]]; then
   echo "gauntlet/run.sh: building @zealagent/dsh-zeal..."
   (cd "$BUNDLE_DIR" && pnpm run build)
@@ -85,7 +88,7 @@ else
   echo "gauntlet/run.sh: ZEAL_SKIP_BUILD set, skipping build"
 fi
 
-PACK_JSON="$(cd "$BUNDLE_DIR" && pnpm pack --json --pack-destination "$SCRATCH")"
+PACK_JSON="$(cd "$BUNDLE_DIR" && pnpm pack --ignore-scripts --json --pack-destination "$SCRATCH")"
 TARBALL_PATH="$(node -e "process.stdout.write(JSON.parse(process.argv[1]).filename)" "$PACK_JSON")"
 echo "gauntlet/run.sh: packed tarball=$TARBALL_PATH"
 

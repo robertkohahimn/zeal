@@ -15,7 +15,7 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { mkdirSync } from 'node:fs'
+import { existsSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parse } from 'yaml'
@@ -91,7 +91,21 @@ function dlx(args: string[], dshHome: string): string {
 let built = false
 
 function buildBundle(): void {
-  if (process.env['ZEAL_SKIP_BUILD']) return
+  if (process.env['ZEAL_SKIP_BUILD']) {
+    // The escape hatch promises the caller ALREADY built `lib/`. Verify that
+    // rather than trusting it: `pnpm pack` does not fail on a missing "files"
+    // glob, it just ships a tarball without one. Skipping the check would
+    // turn a forgotten build into an empty bundle that installs cleanly and
+    // then fails much later, deep inside the composed dsh boot, with an error
+    // that says nothing about the real cause.
+    if (!existsSync(join(BUNDLE_DIR, 'lib'))) {
+      throw new Error(
+        `ZEAL_SKIP_BUILD is set but ${join(BUNDLE_DIR, 'lib')} does not exist — ` +
+          'build the bundle first (`pnpm --filter @zealagent/dsh-zeal run build`) or unset ZEAL_SKIP_BUILD.',
+      )
+    }
+    return
+  }
   if (built) return
   execFileSync('pnpm', ['run', 'build'], {
     cwd: BUNDLE_DIR,
@@ -119,7 +133,13 @@ export function setupProfile(tmp: string): ComposedProfile {
   // (unique per `setupProfile` call/test file), so the tarball's path never
   // collides across concurrent callers even though the package name+version
   // (and hence the tarball's basename) is the same for all of them.
-  const packOut = execFileSync('pnpm', ['pack', '--json', '--pack-destination', tmp], {
+  // `--ignore-scripts` suppresses the package's own `prepack` (which runs
+  // the build): the build is `buildBundle`'s job here, guarded by the
+  // memoization and the `ZEAL_SKIP_BUILD` escape hatch above. Letting
+  // `prepack` fire would put an UNGUARDED `tsdown` behind every pack call
+  // and reintroduce exactly the concurrent-`lib/` race those guards exist
+  // to prevent.
+  const packOut = execFileSync('pnpm', ['pack', '--ignore-scripts', '--json', '--pack-destination', tmp], {
     cwd: BUNDLE_DIR,
     encoding: 'utf8',
     timeout: BUILD_TIMEOUT_MS,

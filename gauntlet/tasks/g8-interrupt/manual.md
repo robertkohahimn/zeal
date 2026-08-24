@@ -43,7 +43,14 @@ tell a real bug from expected behavior):
    disables `zeal-tui`, which this task needs mounted):
 
    ```bash
-   REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"   # this repo's root
+   # Run these from anywhere inside a checkout of this repository.
+   # NOT `dirname "$0"`: this is a document meant to be pasted into an
+   # interactive shell, where `$0` is the shell itself ("-zsh"), not this
+   # file — and even sourced as a script, this file's own
+   # gauntlet/tasks/g8-interrupt/../.. is the `gauntlet` directory, one
+   # level short of the repo root, so Step 1's $REPO_ROOT/packages/dsh-zeal
+   # would not exist.
+   REPO_ROOT="$(git rev-parse --show-toplevel)"
    SCRATCH="$(mktemp -d)"
    DSH_HOME="$SCRATCH/home"
    WORKDIR="$SCRATCH/workdir"
@@ -51,7 +58,7 @@ tell a real bug from expected behavior):
    git -C "$WORKDIR" init -q   # "a scratch repo" per the task brief
 
    (cd "$REPO_ROOT/packages/dsh-zeal" && pnpm run build)
-   PACK_JSON="$(cd "$REPO_ROOT/packages/dsh-zeal" && pnpm pack --json --pack-destination "$SCRATCH")"
+   PACK_JSON="$(cd "$REPO_ROOT/packages/dsh-zeal" && pnpm pack --ignore-scripts --json --pack-destination "$SCRATCH")"
    TARBALL="$(node -e "process.stdout.write(JSON.parse(process.argv[1]).filename)" "$PACK_JSON")"
 
    DSH_HOME="$DSH_HOME" pnpm dlx "@deepseek-ai/dsh@0.1.0-rc.6" plugin --profile zeal add \

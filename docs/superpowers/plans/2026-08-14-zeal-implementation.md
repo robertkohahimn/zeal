@@ -941,6 +941,8 @@ Behavior: `needsInit` when `$DSH_HOME/profiles/zeal/package.json` is missing or 
 
 - [ ] **Step 3: `gauntlet/run.sh`** — args: task dir. Creates a scratch `DSH_HOME`, sets up the `zeal` profile (Task 16 helper flow), appends the overlay to the profile's `cordis.patch.yml`, copies `repo/` to a scratch workdir, runs `ZEAL_TASK="$(cat task.txt)" dsh --profile zeal` from the workdir, then runs `verify.sh` (exit code = pass/fail). Bash, `set -euo pipefail`.
 
+  **Isolation boundary (amended — see spec §5.2):** these scratch directories are the *whole* boundary. They are not a container, and the overlay's blanket `allowed-once` approval answerer means tool calls run with the invoking user's host privileges. Anything stronger (container execution with controlled mounts and explicit credential passing) is deliberately **out of scope for this step** — do not describe this runner as containerized. Revisit before running the gauntlet unattended or on untrusted task content.
+
 - [ ] **Step 4: G1 content.** `repo/`: a 3-file TS project (`sum.ts` with an off-by-one bug: `return a + b + 1`; `sum.test.ts` expecting `sum(2,2) === 4`; `package.json` with vitest). `task.txt`: `The test suite in this repository fails. Find the bug, fix it, and run the tests to confirm they pass.` `verify.sh`: `cd "$WORKDIR" && npx vitest run`.
 
 - [ ] **Step 5: Run G1 with a real key** (`gauntlet/run.sh gauntlet/tasks/g1-fix-test`) → verify.sh exits 0. Record the result row in `GAUNTLET.md` (columns: task, date, model, bundle version, dsh version, outcome, notes).
