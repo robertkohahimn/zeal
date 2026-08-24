@@ -63,7 +63,11 @@
  * and a terminal that doesn't honor bracketed-paste mode would too. After
  * `stripPasteMarkers` (defense-in-depth — see above), a chunk longer than
  * one character is treated as a single `insert` (the reducer splices any
- * embedded newlines across rows) rather than walked key-by-key — unlike
+ * embedded newlines across rows), except that trailing `\r`s dispatch
+ * `submit` — a typing burst most often ends with the Enter that sent it,
+ * and inserting that `\r` as a draft row would swallow the submission (see
+ * the inline comment in the handler for the interior-`\r` trade-off) —
+ * rather than walked key-by-key — unlike
  * `InteractionPanel`'s hotkey-driven views, free text entry is exactly
  * where a multi-char chunk is expected and desired. Trade-off accepted for
  * v1: if a control byte such as ctrl+w's 0x17 ever lands fused into the
@@ -212,9 +216,19 @@ export function InputEditor(props: InputEditorProps): JSX.Element {
       const stripped = stripPasteMarkers(rawInput)
 
       // Multi-char chunk: fast-typing/SSH burst, or a terminal that doesn't
-      // honor bracketed-paste mode — see module doc comment.
+      // honor bracketed-paste mode — see module doc comment. Enter is the
+      // one key a typing burst most often ends with (`hello\r` typed fast
+      // enough to coalesce), so trailing `\r`s are honored as the submit
+      // keypresses they are rather than inserted as draft rows. Interior
+      // `\r`s stay inserts: mid-chunk they far more likely delimit lines of
+      // non-bracketed pasted content, where a premature submit would fire
+      // the half-typed line as a prompt (the exact bug the `usePaste`
+      // channel fixes for bracketed pastes).
       if (stripped.length > 1) {
-        dispatch({ type: 'insert', text: stripped })
+        const trailingReturns = /\r+$/.exec(stripped)?.[0].length ?? 0
+        const body = trailingReturns > 0 ? stripped.slice(0, -trailingReturns) : stripped
+        if (body !== '') dispatch({ type: 'insert', text: body })
+        for (let i = 0; i < trailingReturns; i++) dispatch({ type: 'submit' })
         return
       }
 

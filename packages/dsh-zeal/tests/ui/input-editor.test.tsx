@@ -157,4 +157,23 @@ describe('InputEditor — same-tick bursts (fix round 1, finding 2)', () => {
     expect(onSubmit).toHaveBeenCalledTimes(1)
     expect(onSubmit).toHaveBeenCalledWith('abc')
   })
+
+  it('a single fused chunk ending in \\r ("hello\\r" typed fast enough to coalesce) submits "hello" instead of parking a two-row draft', async () => {
+    const onSubmit = vi.fn()
+    const { stdin } = render(<InputEditor onSubmit={onSubmit} />)
+    // One stdin write, body and Enter fused — the SSH-burst shape.
+    stdin.write('hello\r')
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(onSubmit).toHaveBeenCalledTimes(1)
+    expect(onSubmit).toHaveBeenCalledWith('hello')
+  })
+
+  it('an INTERIOR \\r in a fused chunk stays an inserted newline (non-bracketed multi-line paste safety), only the trailing one submits', async () => {
+    const onSubmit = vi.fn()
+    const { stdin } = render(<InputEditor onSubmit={onSubmit} />)
+    stdin.write('ab\rcd\r')
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(onSubmit).toHaveBeenCalledTimes(1)
+    expect(onSubmit).toHaveBeenCalledWith('ab\ncd')
+  })
 })

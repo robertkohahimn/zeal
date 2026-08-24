@@ -135,6 +135,11 @@ describe('CommandDispatcher', () => {
       const d = new CommandDispatcher({ locals: fakeLocals() })
       expect(d.completions('/')).toEqual(['/help', '/model', '/quit'])
     })
+
+    it('matches case-insensitively, consistent with dispatch\'s lowercasing — /Mo completes what /Model dispatches', () => {
+      const d = new CommandDispatcher({ locals: fakeLocals() })
+      expect(d.completions('/Mo')).toEqual(['/model'])
+    })
   })
 })
 

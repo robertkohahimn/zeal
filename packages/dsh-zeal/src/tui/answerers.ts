@@ -227,10 +227,17 @@ export function registerZealAnswerers(ctx: Context, store: ZealStore): void {
       })
   })
 
-  ctx.userQuestions.registerProvider({
+  // `registerProvider` lives on the UserQuestionService's own context, so
+  // its returned disposer is NOT automatically tied to this plugin's fiber
+  // the way `ctx.on` above is. Register it as an effect explicitly:
+  // otherwise a disposed/remounted zeal-tui fiber would leave the stale
+  // provider registered and the seam ("only one provider may be active")
+  // would reject the replacement.
+  const unregister = ctx.userQuestions.registerProvider({
     ask(request: AskUserQuestionRequest): Promise<AskUserQuestionAnswer> {
       const items = mapQuestions(request)
       return store.askQuestions(items, request.signal).then(answers => mapAnswers(items, answers))
     },
   })
+  ctx.effect(() => unregister, 'zeal question provider')
 }

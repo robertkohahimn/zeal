@@ -372,7 +372,11 @@ export class ZealStore {
         let settled = this.state.settled
         if (live) {
           for (const tool of live.tools) {
-            settled = [...settled, { ...tool, seq: e.seq }]
+            // A tool still live at turn-end never got its tool-end event (the
+            // turn was interrupted or errored out from under it). Settle it
+            // with a terminal status — leaving 'running' would render a
+            // permanently in-flight tool in a turn that already closed.
+            settled = [...settled, { ...tool, seq: e.seq, status: 'error' }]
           }
           if (live.text !== '' || live.reasoning !== '') {
             const trailing: AssistantEntry = { kind: 'assistant', seq: e.seq, text: live.text, reasoning: live.reasoning }

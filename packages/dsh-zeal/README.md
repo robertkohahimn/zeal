@@ -97,7 +97,7 @@ logged. See the [root README's API keys section](../../README.md#api-keys).
 ## Testing
 
 ```sh
-pnpm run build   # tsdown src/startup.ts src/gauntlet-runner.ts src/tui/index.ts --dts --format esm --out-dir lib
+pnpm run build   # tsdown (--dts --unbundle, see package.json) + scripts/assert-dts-exports.mjs regression guard
 pnpm vitest run  # unit + component layers (fast, no network)
 ZEAL_COMPOSITION=1 pnpm vitest run packages/dsh-zeal/tests/composition/invariants.test.ts   # composes against the real dsh CLI (slow, network)
 ```

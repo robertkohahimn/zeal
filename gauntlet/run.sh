@@ -12,7 +12,9 @@
 #
 # Usage:
 #   gauntlet/run.sh <task-dir>
-#   e.g. ZAI_API_KEY=<key> gauntlet/run.sh gauntlet/tasks/g1-fix-test
+#   e.g. (with ZAI_API_KEY already exported — set it via your environment or
+#   secret manager, not inline on the command line, where shell history and
+#   CI logs can capture it) gauntlet/run.sh gauntlet/tasks/g1-fix-test
 #
 # Requires ZAI_API_KEY (or ZHIPU_API_KEY, for the zai-coding-cn route) in the
 # environment — the composed zeal profile's llm-pi-ai config

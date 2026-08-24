@@ -11,9 +11,11 @@
  * A model id absent from this map (a future GLM release, or a hand-declared
  * self-hosted route per README.md's "Self-hosted GLM" section) falls back to
  * {@link DEFAULT_MODEL_WINDOW} rather than throwing or omitting `contextFill`
- * outright — an approximate fill figure is more useful than none, and the
- * fallback is deliberately the smallest of the known windows so it never
- * UNDER-states how full the context is for an unrecognized model.
+ * outright — an approximate fill figure is more useful than none. The
+ * fallback is 200k, the modal window across the known models: for an
+ * unrecognized id the figure may under- or over-state the true fill (it is
+ * an estimate either way), but 200k is the least-surprising guess for a
+ * future GLM release or a hand-declared self-hosted route.
  * @module @zealagent/dsh-zeal/tui/model-windows
  */
 

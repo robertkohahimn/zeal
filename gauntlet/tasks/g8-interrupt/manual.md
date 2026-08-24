@@ -40,7 +40,7 @@ tell a real bug from expected behavior):
 
 1. **Set up a scratch repo and a scratch `zeal` profile with the real,
    interactive TUI** (deliberately NOT the gauntlet overlay — that overlay
-   disables `zeal-tui`, which this task needs mounted):
+   disables `zeal-tui`, which this task requires to be mounted):
 
    ```bash
    # Run these from anywhere inside a checkout of this repository.
@@ -65,10 +65,13 @@ tell a real bug from expected behavior):
      "$TARBALL" @deepseek-ai/dsh-code-runtime-worker-thread
    ```
 
-2. **Start zeal interactively** in the scratch repo, with a real key:
+2. **Start zeal interactively** in the scratch repo, with a real key
+   (`read -rs` keeps it out of shell history — never paste it inline into a
+   command):
 
    ```bash
-   cd "$WORKDIR" && DSH_HOME="$DSH_HOME" ZAI_API_KEY=<key> \
+   read -rs ZAI_API_KEY && export ZAI_API_KEY
+   cd "$WORKDIR" && DSH_HOME="$DSH_HOME" \
      pnpm dlx "@deepseek-ai/dsh@0.1.0-rc.6" --profile zeal
    ```
 

@@ -192,10 +192,11 @@ Layout:
   tail (**v1 narrowing — see §8**: fixed preview caps, no collapse/expand;
   previews appear at settle, not as a live streaming tail);
 - subagent activity nested under the delegating tool call (how dsh surfaces it);
-- status bar: model/route, session title, **token counts and context fill —
-  never derived dollar cost** (the zai catalogs price all models at 0; a
-  currency figure would be confidently wrong — review N1), sandbox mode,
-  retry state during provider retries;
+- status bar: model/route, session title, **context fill as a percentage —
+  never raw token counts, never derived dollar cost** (raw counts are noise
+  at a glance and the README's status-bar contract excludes them; the zai
+  catalogs price all models at 0, so a currency figure would be confidently
+  wrong — review N1), sandbox mode, retry state during provider retries;
 - input editor, **v1 boundary fixed** (review A6): multiline via explicit
   keybinding (not auto-detect), bracketed-paste support, input history,
   slash-command autocomplete menu. Explicitly out of v1: IME composition
@@ -359,7 +360,8 @@ answerers give them their interactive surface.
    plan-review, compaction notice, subagent nesting, onboarding.
 3. **Composition (review A10, two tests):**
    (a) *invariant assertions* on exactly the rows Zeal touches, via
-   `dsh --profile zeal --dump-config` — must-pass CI on every push;
+   `dsh --profile zeal --dump-config` — must-pass whenever the gate below
+   enables the suite;
    (b) *full-tree snapshot* updated deliberately during the §2.3 upgrade
    ritual — the diff is the upgrade review artifact. Splitting keeps the
    tripwire alive: a whole-tree diff failing on every harmless upstream change
@@ -368,7 +370,9 @@ answerers give them their interactive surface.
    against api.z.ai; skipped without `ZAI_API_KEY`.
 5. **Acceptance gauntlet (§6.5).**
 
-CI: layers 1–3 every push; 4–5 credential-gated/manual.
+CI: layers 1–2 every run; layer 3 is opt-in (`ZEAL_COMPOSITION=1` — it
+composes against the real dsh CLI over the network, and no committed CI
+configuration enables it yet); 4–5 credential-gated/manual.
 
 ### 6.5 Gauntlet
 

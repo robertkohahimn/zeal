@@ -303,7 +303,8 @@ scratch workdir, runs the task unattended, and then runs the task's own
 printed as a diagnostic only, never what decides the outcome.
 
 ```sh
-ZAI_API_KEY=<key> gauntlet/run.sh gauntlet/tasks/g1-fix-test
+read -rs ZAI_API_KEY && export ZAI_API_KEY   # keeps the key out of shell history and CI command logs
+gauntlet/run.sh gauntlet/tasks/g1-fix-test
 ```
 
 (`ZHIPU_API_KEY` works too, for the `zai-coding-cn` route; the script passes

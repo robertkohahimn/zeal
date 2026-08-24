@@ -120,6 +120,15 @@ export function main(argv: string[] = process.argv.slice(2)): void {
   }
 
   const child = spawnSync(process.execPath, [dshBin, ...plan.launchArgs], { stdio: 'inherit' })
+  // Mirror the install step's failure reporting: `status` is null when the
+  // child never ran (spawn error) or died on a signal, and exiting 1 with no
+  // message would hide the cause — the same silent-failure class the
+  // symlink-blind main-module guard fix addressed.
+  if (child.error) {
+    process.stderr.write(`zeal: failed to launch dsh (${child.error.message})\n`)
+  } else if (child.signal !== null) {
+    process.stderr.write(`zeal: dsh was terminated by signal ${child.signal}\n`)
+  }
   process.exit(child.status ?? 1)
 }
 

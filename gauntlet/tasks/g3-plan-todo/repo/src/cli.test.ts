@@ -17,4 +17,8 @@ describe('run', () => {
   it('still finds the name when --json comes first', () => {
     expect(run(['--json', 'Grace'])).toBe('{"greeting":"Hello, Grace!"}')
   })
+
+  it('greets World as JSON when --json is the only argument (the flag must not be taken as the name)', () => {
+    expect(run(['--json'])).toBe('{"greeting":"Hello, World!"}')
+  })
 })

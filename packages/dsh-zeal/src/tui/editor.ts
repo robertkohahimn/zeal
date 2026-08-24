@@ -254,6 +254,9 @@ function historyNext(state: EditorState): EditorState {
 function submit(state: EditorState): ReduceResult {
   const joined = state.lines.join('\n')
   const trimmed = joined.endsWith('\n') ? joined.slice(0, -1) : joined
-  const history = [...state.history, trimmed]
+  // A bare Enter on an empty buffer still submits (App ignores the empty
+  // line) but must not park '' in history, where up/down navigation would
+  // later walk blank entries.
+  const history = trimmed === '' ? [...state.history] : [...state.history, trimmed]
   return { state: emptyEditor(history), submitted: trimmed }
 }

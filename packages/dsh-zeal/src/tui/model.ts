@@ -41,6 +41,7 @@ export interface StatusModel {
   running: boolean
   sandboxMode?: string
   retry?: string
+  /** Context-window fill as a 0–1 FRACTION (`totalTokens / contextWindowFor(model)`), never a percentage — `StatusBar` multiplies by 100 when rendering `ctx NN%`. */
   contextFill?: number
 }
 

@@ -237,6 +237,14 @@ describe('editorReduce — submit', () => {
     expect(state.history).toEqual(['one', 'two'])
   })
 
+  it('a bare Enter on an empty buffer submits \'\' but does not record it in history', () => {
+    const seeded = emptyEditor(['earlier'])
+    const result = editorReduce(seeded, { type: 'submit' })
+    expect(result.submitted).toBe('')
+    // No blank entry: up/down navigation must never walk an empty line.
+    expect(result.state.history).toEqual(['earlier'])
+  })
+
   it('resets historyCursor/draft bookkeeping so a fresh submit does not carry navigation state', () => {
     const seeded = emptyEditor(['old'])
     const navigating = editorReduce(seeded, { type: 'history-prev' }).state

@@ -130,6 +130,38 @@ function fail(io: GauntletIo, error: unknown): void {
 }
 
 /**
+ * Wall-clock bound for the unattended task turn, in ms. A gauntlet run has
+ * no human to notice a hung `whenIdle()` (a model looping on tool calls, a
+ * wedged provider connection), and `gauntlet/run.sh` applies no timeout of
+ * its own — so the runner bounds the turn itself. Overridable via
+ * `ZEAL_GAUNTLET_TIMEOUT_MS` for slow tasks or fast CI probes.
+ */
+export const DEFAULT_TURN_TIMEOUT_MS = 20 * 60_000
+
+/** Resolve the effective turn timeout: `ZEAL_GAUNTLET_TIMEOUT_MS` when set to a positive number, else {@link DEFAULT_TURN_TIMEOUT_MS}. */
+export function turnTimeoutMs(env: Record<string, string | undefined> = process.env): number {
+  const raw = env['ZEAL_GAUNTLET_TIMEOUT_MS']
+  const parsed = raw === undefined ? Number.NaN : Number(raw)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_TURN_TIMEOUT_MS
+}
+
+/**
+ * Race `promise` against a wall-clock deadline. Resolves `'done'` when the
+ * promise settles first, `'timeout'` otherwise. The timer is unref'd so it
+ * never holds the process open past a normal exit.
+ */
+function withDeadline(promise: Promise<unknown>, ms: number): Promise<'done' | 'timeout'> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => { resolve('timeout') }, ms)
+    timer.unref?.()
+    promise.then(
+      () => { clearTimeout(timer); resolve('done') },
+      () => { clearTimeout(timer); resolve('done') },
+    )
+  })
+}
+
+/**
  * Pure: pick the machine's deterministic answer for one question. Exported
  * for direct unit testing (this task's required TDD target).
  *
@@ -218,7 +250,20 @@ async function run(ctx: Context, task: string, io: GauntletIo): Promise<void> {
     content: [{ type: 'text', text: task }],
     source: { kind: 'user' },
   }))
-  await agent.whenIdle()
+  // The task turn is the unbounded, model-driven part — bound it (see
+  // DEFAULT_TURN_TIMEOUT_MS). On timeout, still flush what the session
+  // recorded so the hung run is debuggable, then exit failing.
+  const idle = agent.whenIdle()
+  const timeoutMs = turnTimeoutMs()
+  if (await withDeadline(idle, timeoutMs) === 'timeout') {
+    io.stderr.write(`dsh: gauntlet task did not go idle within ${timeoutMs}ms — aborting the run\n`)
+    await sessions.flush(agent.session)
+    io.exit(1)
+    return
+  }
+  // `withDeadline` reports 'done' for a rejection too; re-await so a real
+  // failure propagates to `apply`'s catch → `fail` instead of being dropped.
+  await idle
   await sessions.flush(agent.session)
   const outcome = summarize(agent.session.events, firstSeq)
   io.stdout.write(outcome.text + '\n')

@@ -3,3 +3,4 @@ lib/
 *.tsbuildinfo
 .sessions/
 .claude/settings.local.json
+.credentials.yaml

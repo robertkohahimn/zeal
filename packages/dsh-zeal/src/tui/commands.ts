@@ -157,11 +157,12 @@ export class CommandDispatcher {
     return this.mergedDescriptors()
   }
 
-  /** Merged, deduped, sorted `/name` completions whose text starts with `prefix`. */
+  /** Merged, deduped, sorted `/name` completions whose text starts with `prefix` — case-insensitively, matching `dispatch`'s own lowercasing so `/Mo` completes the same commands `/Model` would dispatch. */
   completions(prefix: string): string[] {
+    const lowered = prefix.toLowerCase()
     return this.mergedDescriptors()
       .map((d) => `/${d.name}`)
-      .filter((n) => n.startsWith(prefix))
+      .filter((n) => n.toLowerCase().startsWith(lowered))
   }
 
   /**

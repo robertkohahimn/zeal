@@ -72,7 +72,7 @@ describe('ZealStore fold semantics', () => {
     expect(store.getState().settled).toEqual([{ kind: 'user', seq: 1, text: 'hello there' }])
   })
 
-  it('turn-end settles still-running live tools and remaining live text, then clears live and stops running', () => {
+  it('turn-end settles still-running live tools with a terminal error status and remaining live text, then clears live and stops running', () => {
     const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
     store.apply(fixtures.turnStart(1))
     store.apply(fixtures.toolCall('call_1', 'bash', '{}', 2))
@@ -81,8 +81,10 @@ describe('ZealStore fold semantics', () => {
     const state = store.getState()
     expect(state.live).toBeUndefined()
     expect(state.status.running).toBe(false)
+    // An orphaned tool (no tool-end before the turn closed) must not settle
+    // as 'running' — the transcript would show it in-flight forever.
     expect(state.settled).toEqual([
-      { kind: 'tool', seq: 4, callId: 'call_1', name: 'bash', args: '{}', status: 'running', preview: '' },
+      { kind: 'tool', seq: 4, callId: 'call_1', name: 'bash', args: '{}', status: 'error', preview: '' },
       { kind: 'assistant', seq: 4, text: 'trailing', reasoning: '' },
     ])
   })

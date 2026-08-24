@@ -29,11 +29,12 @@ type ApprovalListener = (req: ApprovalRequest, next: () => Promise<ApprovalOutco
 /** A stub `next()` a real waterfall dispatch would supply — Zeal's listener must never call it (see answerers.ts module doc), but the call signature requires one. */
 const stubNext = (): Promise<ApprovalOutcome> => Promise.resolve('unavailable')
 
-/** Fake ctx exposing only the two surfaces `registerZealAnswerers` consumes: `on` and `userQuestions.registerProvider`. */
+/** Fake ctx exposing only the surfaces `registerZealAnswerers` consumes: `on`, `userQuestions.registerProvider`, and `effect` (the fiber tie-down for the provider's disposer). */
 class FakeCtx {
   readonly onCalls: string[] = []
   approvalListener?: ApprovalListener
-  questionProvider?: UserQuestionProvider
+  questionProvider?: UserQuestionProvider | undefined
+  readonly effectDisposers: Array<() => unknown> = []
 
   on(name: string, listener: (...args: never[]) => unknown): () => boolean {
     this.onCalls.push(name)
@@ -41,10 +42,16 @@ class FakeCtx {
     return () => true
   }
 
+  effect(execute: () => () => unknown, _label?: string): void {
+    this.effectDisposers.push(execute())
+  }
+
   readonly userQuestions = {
     registerProvider: (provider: UserQuestionProvider): (() => void) => {
       this.questionProvider = provider
-      return () => {}
+      return () => {
+        if (this.questionProvider === provider) this.questionProvider = undefined
+      }
     },
   }
 }
@@ -189,6 +196,13 @@ describe('registerZealAnswerers', () => {
     const { ctx } = setup()
     expect(ctx.onCalls).toEqual(['approval/request'])
     expect(ctx.questionProvider).toBeDefined()
+  })
+
+  it('ties the provider\'s unregister disposer to the fiber via ctx.effect, so a disposed zeal-tui mount unregisters it', () => {
+    const { ctx } = setup()
+    expect(ctx.effectDisposers).toHaveLength(1)
+    ctx.effectDisposers[0]()
+    expect(ctx.questionProvider).toBeUndefined()
   })
 
   it('approval: an "allow-once" store decision flows through to the waterfall listener resolving "allowed-once"', async () => {

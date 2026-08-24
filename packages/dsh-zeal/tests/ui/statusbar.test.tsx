@@ -38,8 +38,13 @@ describe('StatusBar', () => {
     const status: StatusModel = { provider: 'zai', model: 'glm-4.6', running: false }
     const { lastFrame } = render(<StatusBar status={status} width={80} />)
     const frame = lastFrame()!
-    // No stray separator runs left behind where an omitted segment would go.
+    // No stray separator runs left behind where an omitted segment would go…
     expect(frame).not.toMatch(/·\s*·\s*·/)
+    // …and truly ABSENT, not rendered as an empty/undefined segment: nothing
+    // sandbox- or retry-shaped may appear anywhere in the frame.
+    expect(frame).not.toContain('undefined')
+    expect(frame.toLowerCase()).not.toContain('sandbox')
+    expect(frame.toLowerCase()).not.toContain('retry')
   })
 
   it('shows sandboxMode and retry when present', () => {

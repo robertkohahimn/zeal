@@ -36,11 +36,13 @@ import type { AskUserQuestionAnswer, AskUserQuestionItem, AskUserQuestionRequest
 import {
   apply,
   Config,
+  DEFAULT_TURN_TIMEOUT_MS,
   internals,
   mapMachineAnswer,
   mapMachineAnswers,
   name,
   registerMachineSubstitutes,
+  turnTimeoutMs,
 } from '../src/gauntlet-runner.ts'
 
 describe('mapMachineAnswer / mapMachineAnswers', () => {
@@ -167,6 +169,22 @@ describe('registerMachineSubstitutes', () => {
     const answer: AskUserQuestionAnswer = await ctx.questionProvider!.ask(request)
     expect(answer).toEqual(mapMachineAnswers(request))
     expect(answer).toEqual({ answers: [{ id: 'q1', selected: ['yes'] }, { id: 'plan', selected: ['Approve'] }] })
+  })
+})
+
+describe('turnTimeoutMs', () => {
+  it('defaults to DEFAULT_TURN_TIMEOUT_MS when the env var is unset', () => {
+    expect(turnTimeoutMs({})).toBe(DEFAULT_TURN_TIMEOUT_MS)
+  })
+
+  it('honors a positive ZEAL_GAUNTLET_TIMEOUT_MS override', () => {
+    expect(turnTimeoutMs({ ZEAL_GAUNTLET_TIMEOUT_MS: '5000' })).toBe(5000)
+  })
+
+  it('falls back to the default for a non-numeric, zero, or negative override', () => {
+    expect(turnTimeoutMs({ ZEAL_GAUNTLET_TIMEOUT_MS: 'soon' })).toBe(DEFAULT_TURN_TIMEOUT_MS)
+    expect(turnTimeoutMs({ ZEAL_GAUNTLET_TIMEOUT_MS: '0' })).toBe(DEFAULT_TURN_TIMEOUT_MS)
+    expect(turnTimeoutMs({ ZEAL_GAUNTLET_TIMEOUT_MS: '-1' })).toBe(DEFAULT_TURN_TIMEOUT_MS)
   })
 })
 
