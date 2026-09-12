@@ -1,0 +1,390 @@
+import fc from 'fast-check'
+import { describe, expect, it } from 'vitest'
+import { ZealStore, ZealStoreResetError } from '../src/tui/store.ts'
+import { eventSequence } from './fixtures/arbitraries.ts'
+import { fixtures } from './fixtures/events.ts'
+
+describe('ZealStore fold semantics', () => {
+  it('turn-start opens a live turn and marks status running', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    store.apply(fixtures.turnStart(1))
+    const state = store.getState()
+    expect(state.live).toEqual({ text: '', reasoning: '', tools: [] })
+    expect(state.status.running).toBe(true)
+  })
+
+  it('text-delta appends to live.text', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    store.apply(fixtures.turnStart(1))
+    store.apply(fixtures.textChunk('ab', 2))
+    store.apply(fixtures.textChunk('cd', 3))
+    expect(store.getState().live?.text).toBe('abcd')
+  })
+
+  it('reasoning-delta appends to live.reasoning', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    store.apply(fixtures.turnStart(1))
+    store.apply(fixtures.reasoningChunk('hm', 2))
+    store.apply(fixtures.reasoningChunk('m...', 3))
+    expect(store.getState().live?.reasoning).toBe('hmm...')
+  })
+
+  it('tool-call adds a running ToolEntry to live.tools', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    store.apply(fixtures.turnStart(1))
+    store.apply(fixtures.toolCall('call_1', 'bash', '{"cmd":"ls"}', 2))
+    expect(store.getState().live?.tools).toEqual([
+      { kind: 'tool', seq: 2, callId: 'call_1', name: 'bash', args: '{"cmd":"ls"}', status: 'running', preview: '' },
+    ])
+  })
+
+  it('tool-result settles the matching tool into settled with ok/error status and preview, removing it from live.tools', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    store.apply(fixtures.turnStart(1))
+    store.apply(fixtures.toolCall('call_1', 'bash', '{"cmd":"ls"}', 2))
+    store.apply(fixtures.toolResult('call_1', false, 'file1\nfile2', 3))
+    let state = store.getState()
+    expect(state.live?.tools).toEqual([])
+    expect(state.settled).toEqual([
+      { kind: 'tool', seq: 3, callId: 'call_1', name: 'bash', args: '{"cmd":"ls"}', status: 'ok', preview: 'file1\nfile2' },
+    ])
+
+    store.apply(fixtures.toolCall('call_2', 'edit', '{}', 4))
+    store.apply(fixtures.toolResult('call_2', true, 'boom', 5))
+    state = store.getState()
+    expect(state.settled[1]).toEqual({ kind: 'tool', seq: 5, callId: 'call_2', name: 'edit', args: '{}', status: 'error', preview: 'boom' })
+  })
+
+  it('assistant-message settles an AssistantEntry with the full text and resets live text/reasoning', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    store.apply(fixtures.turnStart(1))
+    store.apply(fixtures.textChunk('partial', 2))
+    store.apply(fixtures.reasoningChunk('thinking', 3))
+    store.apply(fixtures.assistantMessage('final answer', 'final reasoning', 4))
+    const state = store.getState()
+    expect(state.settled).toEqual([{ kind: 'assistant', seq: 4, text: 'final answer', reasoning: 'final reasoning' }])
+    expect(state.live).toEqual({ text: '', reasoning: '', tools: [] })
+  })
+
+  it('user-message settles a UserEntry', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    store.apply(fixtures.userMessage('hello there', 1))
+    expect(store.getState().settled).toEqual([{ kind: 'user', seq: 1, text: 'hello there' }])
+  })
+
+  it('turn-end settles still-running live tools with a terminal error status and remaining live text, then clears live and stops running', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    store.apply(fixtures.turnStart(1))
+    store.apply(fixtures.toolCall('call_1', 'bash', '{}', 2))
+    store.apply(fixtures.textChunk('trailing', 3))
+    store.apply(fixtures.turnEnd('completed', 4))
+    const state = store.getState()
+    expect(state.live).toBeUndefined()
+    expect(state.status.running).toBe(false)
+    // An orphaned tool (no tool-end before the turn closed) must not settle
+    // as 'running' — the transcript would show it in-flight forever.
+    expect(state.settled).toEqual([
+      { kind: 'tool', seq: 4, callId: 'call_1', name: 'bash', args: '{}', status: 'error', preview: '' },
+      { kind: 'assistant', seq: 4, text: 'trailing', reasoning: '' },
+    ])
+  })
+
+  it('turn-end does not settle leftover live text when it is empty', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    store.apply(fixtures.turnStart(1))
+    store.apply(fixtures.turnEnd('completed', 2))
+    expect(store.getState().settled).toEqual([])
+  })
+
+  it('turn-end settles trailing reasoning-only live content, not just text (Finding 1 regression)', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    store.apply(fixtures.turnStart(1))
+    store.apply(fixtures.reasoningChunk('still thinking', 2))
+    store.apply(fixtures.turnEnd('aborted', 3))
+    expect(store.getState().settled).toEqual([
+      { kind: 'assistant', seq: 3, text: '', reasoning: 'still thinking' },
+      { kind: 'notice', seq: 3, level: 'info', text: 'turn interrupted' },
+    ])
+  })
+
+  it('turn-end with an error outcome adds a NoticeEntry carrying the error message', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    store.apply(fixtures.turnStart(1))
+    store.apply(fixtures.turnEndError('RATE_LIMIT', 'too many requests', 2))
+    expect(store.getState().settled).toEqual([{ kind: 'notice', seq: 2, level: 'error', text: 'too many requests' }])
+  })
+
+  it('turn-end with an aborted outcome adds an info notice', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    store.apply(fixtures.turnStart(1))
+    store.apply(fixtures.turnEnd('aborted', 2))
+    expect(store.getState().settled).toEqual([{ kind: 'notice', seq: 2, level: 'info', text: 'turn interrupted' }])
+  })
+
+  // I5 (Ruling R4): an assistant-message carrying usage updates
+  // status.contextFill using the CURRENT model's window from MODEL_WINDOWS.
+  it('assistant-message with usage updates status.contextFill using the current model\'s context window', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' }) // 1,000,000-token window
+    store.apply(fixtures.assistantMessage('answer', '', 1, { inputTokens: 400_000, outputTokens: 100_000 }))
+    expect(store.getState().status.contextFill).toBeCloseTo(0.5)
+  })
+
+  it('assistant-message without usage leaves contextFill untouched (undefined by default)', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    store.apply(fixtures.assistantMessage('answer', '', 1))
+    expect(store.getState().status.contextFill).toBeUndefined()
+  })
+
+  it('assistant-message without usage does not clear a previously-set contextFill', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    store.apply(fixtures.assistantMessage('first', '', 1, { inputTokens: 500_000, outputTokens: 0 }))
+    expect(store.getState().status.contextFill).toBeCloseTo(0.5)
+    store.apply(fixtures.assistantMessage('second, no usage', '', 2))
+    expect(store.getState().status.contextFill).toBeCloseTo(0.5)
+  })
+
+  it('contextFill reflects only the LATEST usage, not a cumulative sum across turns', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' }) // 1,000,000-token window
+    store.apply(fixtures.assistantMessage('first', '', 1, { inputTokens: 100_000, outputTokens: 0 }))
+    expect(store.getState().status.contextFill).toBeCloseTo(0.1)
+    store.apply(fixtures.assistantMessage('second', '', 2, { inputTokens: 300_000, outputTokens: 0 }))
+    // 0.3, not 0.4 — a cumulative sum would double-count shared history.
+    expect(store.getState().status.contextFill).toBeCloseTo(0.3)
+  })
+
+  it('an unrecognized model id falls back to DEFAULT_MODEL_WINDOW for contextFill', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'some-future-model' })
+    store.apply(fixtures.assistantMessage('answer', '', 1, { inputTokens: 100_000, outputTokens: 0 }))
+    expect(store.getState().status.contextFill).toBeCloseTo(0.5) // 100k / 200k default window
+  })
+
+  // I6b (final-review fix wave, Ruling R5): compaction/end folds into a
+  // notice in settled, same as any other notice.
+  it('compaction/end folds into an info notice in settled', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    store.apply(fixtures.turnStart(1))
+    store.apply(fixtures.compactionEnd(2))
+    expect(store.getState().settled).toEqual([{ kind: 'notice', seq: 2, level: 'info', text: 'context compacted' }])
+  })
+
+  it('request-header updates status provider and model', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    store.apply(fixtures.requestHeader('zai', 'glm-5.2-turbo', 1))
+    const state = store.getState()
+    expect(state.status.provider).toBe('zai')
+    expect(state.status.model).toBe('glm-5.2-turbo')
+  })
+
+  it('drops events with seq <= lastSeq (idempotent resume replay)', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    store.apply(fixtures.turnStart(1))
+    store.apply(fixtures.textChunk('a', 2))
+    const snapshot = store.getState()
+    store.apply(fixtures.textChunk('a', 2)) // exact duplicate seq
+    store.apply(fixtures.reasoningChunk('x', 1)) // lower seq
+    expect(store.getState()).toEqual(snapshot)
+  })
+
+  it('(CRITICAL-1) does not drop a seq-0 event on a fresh store (session seqs start at 0)', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    store.apply(fixtures.turnStart(0))
+    expect(store.getState().live).toEqual({ text: '', reasoning: '', tools: [] })
+    expect(store.getState().status.running).toBe(true)
+    // A second, later event still folds normally after the seq-0 event landed.
+    store.apply(fixtures.textChunk('hi', 1))
+    expect(store.getState().live?.text).toBe('hi')
+  })
+})
+
+describe('ZealStore fold interleavings (review findings)', () => {
+  it('a tool-result with no matching call is a safe no-op, settled unchanged', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    store.apply(fixtures.turnStart(1))
+    store.apply(fixtures.toolResult('unknown_call', false, 'ignored', 2))
+    const state = store.getState()
+    expect(state.settled).toEqual([])
+    expect(state.live).toEqual({ text: '', reasoning: '', tools: [] })
+  })
+
+  it('deltas, tool-call, and tool-result arriving before any turn-start are no-ops', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    store.apply(fixtures.textChunk('a', 1))
+    store.apply(fixtures.reasoningChunk('b', 2))
+    store.apply(fixtures.toolCall('call_1', 'bash', '{}', 3))
+    store.apply(fixtures.toolResult('call_1', false, 'out', 4))
+    const state = store.getState()
+    expect(state.live).toBeUndefined()
+    expect(state.settled).toEqual([])
+  })
+
+  it('assistant-message mid-turn leaves still-running tools untouched in live.tools', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    store.apply(fixtures.turnStart(1))
+    store.apply(fixtures.toolCall('call_1', 'bash', '{}', 2))
+    store.apply(fixtures.assistantMessage('interim', 'thinking', 3))
+    const state = store.getState()
+    expect(state.live?.tools).toEqual([
+      { kind: 'tool', seq: 2, callId: 'call_1', name: 'bash', args: '{}', status: 'running', preview: '' },
+    ])
+    expect(state.settled).toEqual([{ kind: 'assistant', seq: 3, text: 'interim', reasoning: 'thinking' }])
+  })
+
+  it('resolving one of two concurrently running tools leaves the sibling running in live.tools', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    store.apply(fixtures.turnStart(1))
+    store.apply(fixtures.toolCall('call_1', 'bash', '{}', 2))
+    store.apply(fixtures.toolCall('call_2', 'edit', '{}', 3))
+    store.apply(fixtures.toolResult('call_1', false, 'done', 4))
+    const state = store.getState()
+    expect(state.live?.tools).toEqual([
+      { kind: 'tool', seq: 3, callId: 'call_2', name: 'edit', args: '{}', status: 'running', preview: '' },
+    ])
+    expect(state.settled).toEqual([
+      { kind: 'tool', seq: 4, callId: 'call_1', name: 'bash', args: '{}', status: 'ok', preview: 'done' },
+    ])
+  })
+})
+
+describe('ZealStore public API', () => {
+  it('addNotice appends a NoticeEntry to settled', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    store.addNotice('info', 'connected')
+    expect(store.getState().settled).toEqual([{ kind: 'notice', seq: 0, level: 'info', text: 'connected' }])
+  })
+
+  it('setStatus merges a partial patch into status', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    store.setStatus({ title: 'building', contextFill: 0.42 })
+    expect(store.getState().status).toEqual({
+      provider: 'zai',
+      model: 'glm-5.2',
+      running: false,
+      title: 'building',
+      contextFill: 0.42,
+    })
+  })
+
+  it('reset() clears settled/live and re-seeds status from the given provider/model, dropping stale status fields', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    store.apply(fixtures.turnStart(1))
+    store.apply(fixtures.textChunk('partial', 2))
+    store.apply(fixtures.userMessage('hello', 3))
+    store.setStatus({ title: 'old session title', sandboxMode: 'sandboxed', retry: 'retry 1/3', contextFill: 0.9 })
+    expect(store.getState().settled.length).toBeGreaterThan(0)
+
+    store.reset({ provider: 'zai-coding-cn', model: 'glm-4.7' })
+
+    expect(store.getState()).toEqual({
+      settled: [],
+      status: { provider: 'zai-coding-cn', model: 'glm-4.7', running: false },
+      generation: 1,
+    })
+  })
+
+  // C3 (final-review fix wave): `generation` starts at 0 on a fresh store
+  // and increments by exactly 1 per `reset()` call — the signal
+  // `Transcript.tsx` keys `<Static>` with to force a remount after a
+  // `/resume` restart. See `model.ts`'s and `store.ts`'s doc comments.
+  it('generation starts at 0 and increments by one per reset() call', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    expect(store.getState().generation).toBe(0)
+
+    store.reset({ provider: 'zai', model: 'glm-5.2' })
+    expect(store.getState().generation).toBe(1)
+
+    store.reset({ provider: 'zai', model: 'glm-5.2' })
+    expect(store.getState().generation).toBe(2)
+  })
+
+  // CRITICAL 1 (Task 14 review): the whole reason `reset()` exists — a
+  // resumed session's `seq` counter starts back at 0, independent of the
+  // retiring session's. Without resetting `lastSeq`, the guard in `apply()`
+  // would treat the resumed session's low seqs as stale replay and drop them.
+  it('reset() rewinds lastSeq so a subsequent apply() at a LOWER seq than before reset is not dropped as stale', () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    store.apply(fixtures.turnStart(5))
+    store.apply(fixtures.userMessage('from the retiring session', 6))
+    expect(store.getState().settled).toHaveLength(1)
+
+    store.reset({ provider: 'zai', model: 'glm-5.2' })
+
+    // A resumed session's seed starts back at seq 0 — lower than 6, the
+    // retiring session's high-water mark. Pre-fix, `apply`'s `seq <=
+    // lastSeq` guard (still at 6) would silently drop this.
+    store.apply(fixtures.turnStart(0))
+    store.apply(fixtures.userMessage('from the resumed session', 1))
+    const settled = store.getState().settled
+    expect(settled).toHaveLength(1)
+    expect(settled[0]).toMatchObject({ text: 'from the resumed session' })
+  })
+
+  it('reset() rejects any still-queued interaction with ZealStoreResetError and clears state.interaction', async () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    const pending = store.askApproval({ title: 'Allow?', detail: '', agentLabel: 'main' })
+    expect(store.getState().interaction).toBeDefined()
+
+    store.reset({ provider: 'zai', model: 'glm-5.2' })
+
+    await expect(pending).rejects.toBeInstanceOf(ZealStoreResetError)
+    expect(store.getState().interaction).toBeUndefined()
+  })
+
+  it('reset() lets a fresh interaction be queued afterward (the queue itself is usable again, not just cleared)', async () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    const staleApproval = store.askApproval({ title: 'stale', detail: '', agentLabel: 'main' })
+    store.reset({ provider: 'zai', model: 'glm-5.2' })
+    await expect(staleApproval).rejects.toBeInstanceOf(ZealStoreResetError)
+
+    const fresh = store.askApproval({ title: 'fresh', detail: '', agentLabel: 'main' })
+    const interaction = store.getState().interaction
+    expect(interaction).toMatchObject({ kind: 'approval', title: 'fresh' })
+    store.resolveInteraction((interaction as { id: number }).id, 'allow-once')
+    await expect(fresh).resolves.toBe('allow-once')
+  })
+
+  it('coalesces subscribe notifications within ~16ms and stops after unsubscribe', async () => {
+    const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+    let calls = 0
+    const unsubscribe = store.subscribe(() => { calls++ })
+
+    store.apply(fixtures.turnStart(1))
+    store.apply(fixtures.textChunk('a', 2))
+    store.apply(fixtures.textChunk('b', 3))
+    expect(calls).toBe(0)
+
+    await new Promise(resolve => setTimeout(resolve, 30))
+    expect(calls).toBe(1)
+
+    unsubscribe()
+    store.apply(fixtures.textChunk('c', 4))
+    await new Promise(resolve => setTimeout(resolve, 30))
+    expect(calls).toBe(1)
+  })
+})
+
+describe('ZealStore fold properties', () => {
+  it('re-applying any prefix is a no-op (idempotence under replay)', () => {
+    fc.assert(fc.property(eventSequence(), (events) => {
+      const a = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+      for (const e of events) a.apply(e)
+      const before = JSON.stringify(a.getState())
+      for (const e of events) a.apply(e) // full replay: all seqs stale
+      expect(JSON.stringify(a.getState())).toBe(before)
+    }))
+  })
+
+  it('settled entries only grow, in seq order', () => {
+    fc.assert(fc.property(eventSequence(), (events) => {
+      const s = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+      let prev = 0
+      for (const e of events) {
+        s.apply(e)
+        const n = s.getState().settled.length
+        expect(n).toBeGreaterThanOrEqual(prev)
+        prev = n
+      }
+      const seqs = s.getState().settled.map(x => x.seq)
+      expect([...seqs].sort((x, y) => x - y)).toEqual(seqs)
+    }))
+  })
+})

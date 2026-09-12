@@ -1,0 +1,21 @@
+{
+  "name": "zeal-workspace",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "pnpm -r run build",
+    "test": "vitest run",
+    "typecheck": "pnpm -r exec tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0",
+    "tsdown": "^0.12.0",
+    "@modelcontextprotocol/sdk": "^1.30.0"
+  },
+  "pnpm": {
+    "overrides": {
+      "@deepseek-ai/dsh-scope": "0.1.0-rc.6"
+    }
+  }
+}

@@ -1,0 +1,3 @@
+Use a subagent to audit src/ for TODO comments and then fix each one it
+reports. Once every TODO-marked bug is fixed, run the tests to confirm
+they pass.

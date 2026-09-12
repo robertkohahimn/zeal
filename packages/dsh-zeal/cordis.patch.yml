@@ -1,0 +1,52 @@
+# Zeal bundle patch — rides over @deepseek-ai/dsh-base. A patch REPLACES the
+# targeted row's whole config; every touched row is stated completely.
+
+# Base mounts llm-pi-ai dormant; these entry-config routes bring it live.
+# Settings-layer sections deep-merge per route and can add/override but never
+# remove these (verified: llm-pi-ai dynamic-config tests).
+- id: llm-pi-ai
+  config:
+    providers:
+      zai:
+        apiKeyEnv: ZAI_API_KEY
+        reasoning: high
+      zai-coding-cn:
+        apiKeyEnv: ZHIPU_API_KEY
+        reasoning: high
+
+- id: agent-default-model
+  config:
+    provider: zai
+    model: glm-5.2
+
+- id: llm-deepseek
+  disabled: true
+
+# Ink owns the terminal; module-reload watching would fight it.
+- id: hmr
+  disabled: true
+
+- id: session-telemetry-otel
+  disabled: true
+
+# Backend is DeepSeek's search API; a GLM user has no credential for it.
+- id: web-search-deepseek
+  disabled: true
+- id: tool-web
+  disabled: true
+
+- id: system-prompt
+  config:
+    persona: >-
+      You are Zeal, a coding agent powered by the {{model}} model. Your working
+      directory is {{cwd}}. Verify your work by running the code or tests
+      before declaring it done. Prefer editing existing files over rewriting
+      them. Keep answers brief and factual.
+
+- insert:
+    - id: code-runtime
+      name: '@deepseek-ai/dsh-code-runtime-worker-thread'
+    - id: zeal-startup
+      name: '@zealagent/dsh-zeal/startup'
+    - id: zeal-tui
+      name: '@zealagent/dsh-zeal/tui'

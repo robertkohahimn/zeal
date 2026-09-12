@@ -1,0 +1,20 @@
+{
+  "name": "@zealagent/zeal",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Zeal: launcher that bootstraps and runs the GLM-powered terminal coding agent for DeepSeek Harness (npx @zealagent/zeal)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/robertkohahimn/zeal.git",
+    "directory": "packages/zeal"
+  },
+  "engines": { "node": ">=22" },
+  "bin": { "zeal": "./lib/main.js" },
+  "files": ["lib"],
+  "scripts": {
+    "build": "tsdown src/main.ts --format esm --out-dir lib",
+    "prepack": "pnpm run build"
+  },
+  "dependencies": { "@deepseek-ai/dsh": "0.1.0-rc.6" }
+}

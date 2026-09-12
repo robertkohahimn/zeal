@@ -1,0 +1,27 @@
+# Gauntlet overlay — appended onto the `zeal` profile's own cordis.patch.yml
+# (see gauntlet/run.sh) by `gauntlet/run.sh` before each run. Turns the
+# interactive TUI bundle into an unattended, machine-driven one-shot runner:
+# the TUI never mounts, the CLI startup parser never runs (no `--resume`/
+# `--model` flags to parse in an unattended run), and `zeal-gauntlet-runner`
+# (Task 17's `packages/dsh-zeal/src/gauntlet-runner.ts`) drives the task
+# instead, reading its prompt from `ZEAL_TASK`.
+- id: zeal-tui
+  disabled: true
+- id: zeal-startup
+  disabled: true
+
+# Store session logs uncompressed so verify.sh can grep them for tool events.
+# A patch REPLACES the row's whole config, so root must be restated — copy the
+# exact base value from $DSH_SRC/packages/bundle/base/cordis.patch.yml
+# (root: !!js dshHomePath('sessions')). Base's default is zstd; grep on
+# compressed frames silently matches nothing.
+- id: session-persistence-jsonl
+  config:
+    root: !!js dshHomePath('sessions')
+    compression: none
+
+- insert:
+    - id: zeal-gauntlet-runner
+      name: '@zealagent/dsh-zeal/gauntlet-runner'
+      config:
+        task: !!js process.env.ZEAL_TASK
