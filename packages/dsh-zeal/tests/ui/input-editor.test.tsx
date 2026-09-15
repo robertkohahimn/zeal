@@ -177,3 +177,129 @@ describe('InputEditor — same-tick bursts (fix round 1, finding 2)', () => {
     expect(onSubmit).toHaveBeenCalledWith('ab\ncd')
   })
 })
+
+// v2: slash-command Tab completion. Ink reports both `\t` and `\x1b[Z`
+// (shift+tab) as `key.tab` — with `input === ''`, since tab is in Ink's
+// `nonAlphanumericKeys` — so these go through the real keypress parser the
+// same way the arrow-key tests above do.
+describe('InputEditor — slash-command Tab completion (v2)', () => {
+  it('tab completes a unique fresh match with a trailing space ready for the argument', async () => {
+    const onSubmit = vi.fn()
+    const { stdin, lastFrame } = render(
+      <InputEditor onSubmit={onSubmit} getCompletions={(line) => ['/help'].filter((n) => n.startsWith(line))} />,
+    )
+    await press(stdin, '/h', '\t')
+    expect(lastFrame()!).toContain('> /help')
+    // The trailing space is invisible in a frame assertion (frames trim line
+    // tails), so prove it through what actually gets submitted.
+    await press(stdin, '\r')
+    expect(onSubmit).toHaveBeenCalledWith('/help ')
+  })
+
+  it('tab cycles forward through multiple candidates and shift+tab cycles back, wrapping', async () => {
+    const candidates = ['/alpha', '/beta', '/gamma']
+    const { stdin, lastFrame } = render(
+      <InputEditor onSubmit={vi.fn()} getCompletions={(line) => candidates.filter((n) => n.startsWith(line))} />,
+    )
+    await press(stdin, '/', '\t')
+    expect(lastFrame()!).toContain('> /alpha')
+    await press(stdin, '\t')
+    expect(lastFrame()!).toContain('> /beta')
+    await press(stdin, '\t')
+    expect(lastFrame()!).toContain('> /gamma')
+    await press(stdin, '\t')
+    expect(lastFrame()!).toContain('> /alpha') // wrapped
+    await press(stdin, '\x1b[Z') // shift+tab — one step back
+    expect(lastFrame()!).toContain('> /gamma')
+  })
+
+  it('the hint keeps listing the ANCHORED prefix\'s candidates while cycling', async () => {
+    const candidates = ['/alpha', '/beta', '/gamma']
+    const { stdin, lastFrame } = render(
+      <InputEditor onSubmit={vi.fn()} getCompletions={(line) => candidates.filter((n) => n.startsWith(line))} />,
+    )
+    await press(stdin, '/', '\t', '\t')
+    const frame = lastFrame()!
+    // All three remain listed (the anchor is still '/'), even though the
+    // buffer now reads '/beta' — without anchoring, the list would have
+    // collapsed to just the selected candidate.
+    expect(frame).toContain('/alpha')
+    expect(frame).toContain('/beta')
+    expect(frame).toContain('/gamma')
+  })
+
+  it('typing after cycling re-anchors on the edited prefix', async () => {
+    const onSubmit = vi.fn()
+    const candidates = ['/ab', '/abc']
+    const { stdin } = render(
+      <InputEditor onSubmit={onSubmit} getCompletions={(line) => candidates.filter((n) => n.startsWith(line))} />,
+    )
+    // '/a' matches both: tab selects '/ab' (no trailing space — not unique).
+    await press(stdin, '/a', '\t')
+    // Extending it with 'c' makes the match unique and FRESH again, so the
+    // next tab completes with the argument space.
+    await press(stdin, 'c', '\t', '\r')
+    expect(onSubmit).toHaveBeenCalledWith('/abc ')
+  })
+
+  it('tab outside a command line is a no-op — nothing inserted, no crash', async () => {
+    const onSubmit = vi.fn()
+    const { stdin, lastFrame } = render(<InputEditor onSubmit={onSubmit} />)
+    await press(stdin, 'hi', '\t')
+    expect(lastFrame()!).toContain('> hi')
+    expect(onSubmit).not.toHaveBeenCalled()
+  })
+
+  it('tab with no matching candidates is a no-op', async () => {
+    const { stdin, lastFrame } = render(
+      <InputEditor onSubmit={vi.fn()} getCompletions={(line) => ['/help'].filter((n) => n.startsWith(line))} />,
+    )
+    await press(stdin, '/z', '\t')
+    expect(lastFrame()!).toContain('> /z')
+  })
+
+  it('renders the dim candidate hint while the line starts with "/"', async () => {
+    const { stdin, lastFrame } = render(
+      <InputEditor
+        onSubmit={vi.fn()}
+        getCompletions={(line) => ['/help', '/model'].filter((n) => n.startsWith(line))}
+      />,
+    )
+    await press(stdin, '/')
+    const frame = lastFrame()!
+    expect(frame).toContain('/help')
+    expect(frame).toContain('/model')
+    // The hint disappears once the line no longer starts with '/'.
+    await press(stdin, '\x7f') // backspace removes the '/'
+    expect(lastFrame()!).not.toContain('/help')
+  })
+})
+
+// v2: kill-ring bindings. `\x0b` is ctrl+k (0x0B), `\x19` is ctrl+y (0x19),
+// `\x1by` is alt+y — all through the real Ink keypress parser.
+describe('InputEditor — kill-ring bindings (v2)', () => {
+  it('ctrl+k kills to end of line; ctrl+y yanks it back at the cursor', async () => {
+    const { stdin, lastFrame } = render(<InputEditor onSubmit={vi.fn()} />)
+    await press(stdin, 'hello', '\x1b[D', '\x1b[D', '\x0b') // left, left, ctrl+k
+    expect(lastFrame()!).toContain('> hel')
+    await press(stdin, '\x19') // ctrl+y
+    expect(lastFrame()!).toContain('> hello')
+  })
+
+  it('alt+y rotates to the older kill after a yank (yank-pop)', async () => {
+    const { stdin, lastFrame } = render(<InputEditor onSubmit={vi.fn()} />)
+    // home before each kill: at end of the line a kill would be a no-op.
+    await press(stdin, 'one', '\x1b[H', '\x0b', 'two', '\x1b[H', '\x0b', '\x19') // ring ['two','one'], yank 'two'
+    expect(lastFrame()!).toContain('> two')
+    await press(stdin, '\x1by') // alt+y — replace with the older entry
+    expect(lastFrame()!).toContain('> one')
+  })
+
+  it('the ring survives a submit — kill in one prompt, yank in the next', async () => {
+    const onSubmit = vi.fn()
+    const { stdin, lastFrame } = render(<InputEditor onSubmit={onSubmit} />)
+    await press(stdin, 'abc', '\x1b[H', '\x0b', '\r', '\x19') // kill all, submit empty, yank
+    expect(onSubmit).toHaveBeenCalledWith('')
+    expect(lastFrame()!).toContain('> abc')
+  })
+})

@@ -5,8 +5,23 @@
  * never inferred from a raw byte the terminal happens to send), bracketed
  * paste is unwrapped by `stripPasteMarkers` before its payload ever reaches
  * `insert`, and `history-prev`/`history-next` provide linear input-history
- * recall. IME composition guarantees and a kill-ring are explicitly out of
- * v1 scope (spec review A6) and this module implements neither.
+ * recall. IME composition guarantees remain out of scope (spec review A6).
+ *
+ * v2 additions: (a) an Emacs-style kill-ring — `kill-line` (bound to
+ * ctrl+k) kills from the cursor to end of line, and at end of line kills the
+ * newline itself (joining rows, exactly C-k's Emacs behavior, so repeated
+ * kills accumulate one multi-line ring entry); consecutive kills APPEND to
+ * the newest entry until any other action breaks the run. `yank` (ctrl+y)
+ * re-inserts the newest entry at the cursor, `yank-pop` (alt+y) replaces the
+ * just-yanked span with the next-older entry, wrapping. The ring (capacity
+ * 10, newest first) survives `submit` — kill in one prompt, yank in the
+ * next; all sequence-progress state (append run, rotation index, yank span)
+ * is dropped by every other action, mirroring Emacs's "any other command
+ * ends the kill sequence". (b) a `complete` action replacing the whole
+ * buffer with a slash-command completion — the editing half of the Tab
+ * cycling `ui/InputEditor.tsx` layers on top; the CANDIDATE list itself is
+ * a caller concern (the App-supplied `getCompletions` prop), kept out of
+ * this pure core.
  *
  * Zero dependency on Ink/React by design: every behavior above is
  * unit-tested here without a terminal (`tests/editor.test.ts`). The Ink
@@ -40,6 +55,19 @@ export interface EditorState {
   historyCursor?: number
   /** Internal bookkeeping only — see module doc comment. */
   draftLines?: string[]
+  /**
+   * Internal bookkeeping only (v2 kill-ring): the kill ring, newest entry
+   * first, capped at {@link KILL_RING_MAX} entries. Deliberately survives
+   * `submit`; nothing outside `killLine`/`yank`/`yankPop` below reads or
+   * writes it.
+   */
+  killRing?: string[]
+  /** Internal: which ring entry the last yank/yank-pop pulled — absent means the newest (index 0). */
+  killIndex?: number
+  /** Internal: true while the PREVIOUS action was `kill-line`, so consecutive kills append to the newest entry (Emacs semantics). */
+  killAppendNext?: boolean
+  /** Internal: the single-row span the last yank inserted, which `yank-pop` replaces in place; cleared by every other action. */
+  yankSpan?: { row: number; start: number; end: number }
 }
 
 export type EditorAction =
@@ -55,6 +83,10 @@ export type EditorAction =
   | { type: 'end' }
   | { type: 'history-prev' }
   | { type: 'history-next' }
+  | { type: 'kill-line' } // bound to ctrl+k — kill cursor→EOL (at EOL, the newline)
+  | { type: 'yank' } // bound to ctrl+y — insert the newest kill
+  | { type: 'yank-pop' } // bound to alt+y — replace the last yank with the next-older kill
+  | { type: 'complete'; text: string } // slash-command Tab completion — replaces the whole buffer
   | { type: 'submit' } // returns text via reduce result
 
 export interface ReduceResult {
@@ -77,29 +109,37 @@ export function emptyEditor(history?: string[]): EditorState {
 export function editorReduce(state: EditorState, action: EditorAction): ReduceResult {
   switch (action.type) {
     case 'insert':
-      return { state: insertText(state, action.text) }
+      return { state: breakKillSequence(insertText(state, action.text)) }
     case 'backspace':
-      return { state: backspace(state) }
+      return { state: breakKillSequence(backspace(state)) }
     case 'delete-word':
-      return { state: deleteWord(state) }
+      return { state: breakKillSequence(deleteWord(state)) }
     case 'newline':
-      return { state: insertText(state, '\n') }
+      return { state: breakKillSequence(insertText(state, '\n')) }
     case 'left':
-      return { state: moveLeft(state) }
+      return { state: breakKillSequence(moveLeft(state)) }
     case 'right':
-      return { state: moveRight(state) }
+      return { state: breakKillSequence(moveRight(state)) }
     case 'up':
-      return { state: moveUp(state) }
+      return { state: breakKillSequence(moveUp(state)) }
     case 'down':
-      return { state: moveDown(state) }
+      return { state: breakKillSequence(moveDown(state)) }
     case 'home':
-      return { state: { ...state, col: 0 } }
+      return { state: breakKillSequence({ ...state, col: 0 }) }
     case 'end':
-      return { state: { ...state, col: currentLine(state).length } }
+      return { state: breakKillSequence({ ...state, col: currentLine(state).length }) }
     case 'history-prev':
-      return { state: historyPrev(state) }
+      return { state: breakKillSequence(historyPrev(state)) }
     case 'history-next':
-      return { state: historyNext(state) }
+      return { state: breakKillSequence(historyNext(state)) }
+    case 'kill-line':
+      return { state: killLine(state) }
+    case 'yank':
+      return { state: yank(state) }
+    case 'yank-pop':
+      return { state: yankPop(state) }
+    case 'complete':
+      return { state: complete(state, action.text) }
     case 'submit':
       return submit(state)
     default:
@@ -119,6 +159,19 @@ function currentLine(state: EditorState): string {
 function exitHistoryNav(state: EditorState): EditorState {
   if (state.historyCursor === undefined) return state
   const { historyCursor: _historyCursor, draftLines: _draftLines, ...rest } = state
+  return rest
+}
+
+/**
+ * Ends any in-progress kill/yank sequence (Emacs: any command outside the
+ * kill/yank family closes a consecutive-kill append run and invalidates the
+ * last yank's replaceable span). Object-identity-preserving when no sequence
+ * was live, so no-op actions on sequence-free states still return the exact
+ * same object — the dispatch layer's render-bailout fast path relies on it.
+ */
+function breakKillSequence(state: EditorState): EditorState {
+  if (state.killIndex === undefined && !state.killAppendNext && state.yankSpan === undefined) return state
+  const { killIndex: _killIndex, killAppendNext: _killAppendNext, yankSpan: _yankSpan, ...rest } = state
   return rest
 }
 
@@ -175,7 +228,7 @@ function backspace(state: EditorState): EditorState {
   return state
 }
 
-/** Deletes the run of non-whitespace (plus any whitespace directly before it) preceding the cursor, within the current line only — no kill-ring, no crossing line boundaries (out of v1 scope). */
+/** Deletes the run of non-whitespace (plus any whitespace directly before it) preceding the cursor, within the current line only — never crosses line boundaries (the v2 kill-ring lives in `killLine` below, with its own boundary rules). */
 function deleteWord(state: EditorState): EditorState {
   if (state.col === 0) return state
   const line = currentLine(state)
@@ -251,6 +304,108 @@ function historyNext(state: EditorState): EditorState {
   return { ...rest, lines: draft, ...cursorAtEnd(draft) }
 }
 
+/** Kill-ring capacity — beyond this many entries the oldest fall off the end. */
+const KILL_RING_MAX = 10
+
+/**
+ * `kill-line`: kills from the cursor to end of the current row; AT end of row
+ * kills the newline itself (joining the row to its successor — exactly C-k's
+ * Emacs behavior, and what lets repeated kills accumulate one multi-line ring
+ * entry); at end of the LAST row there is nothing left to kill and the state
+ * returns unchanged. Consecutive kills append to the newest ring entry while
+ * `killAppendNext` holds; any other action clears it (`breakKillSequence`).
+ */
+function killLine(state: EditorState): EditorState {
+  const line = currentLine(state)
+  let killed: string
+  let lines: string[]
+  if (state.col < line.length) {
+    killed = line.slice(state.col)
+    lines = [...state.lines]
+    lines[state.row] = line.slice(0, state.col)
+  } else if (state.row < state.lines.length - 1) {
+    killed = '\n'
+    lines = [
+      ...state.lines.slice(0, state.row),
+      line + state.lines[state.row + 1]!,
+      ...state.lines.slice(state.row + 2),
+    ]
+  } else {
+    return state
+  }
+  const prevRing = state.killRing ?? []
+  const ring =
+    state.killAppendNext && prevRing.length > 0
+      ? [prevRing[0]! + killed, ...prevRing.slice(1)]
+      : [killed, ...prevRing].slice(0, KILL_RING_MAX)
+  // A fresh kill supersedes (and invalidates) any prior yank span; the append
+  // run flag is (re)armed for a possible consecutive kill.
+  const { yankSpan: _yankSpan, ...base } = state
+  return exitHistoryNav({ ...base, lines, killRing: ring, killIndex: 0, killAppendNext: true })
+}
+
+/**
+ * `yank`: inserts the NEWEST ring entry at the cursor (Emacs C-y always yanks
+ * the head — the rotation pointer only advances via `yank-pop`). The yank span
+ * is tracked only when the entry landed on a single row (entries CAN contain
+ * newlines via `killLine`'s EOL branch); a multi-row yank gets no span, so a
+ * following `yank-pop` is a no-op rather than a wrongly-ranged replacement.
+ */
+function yank(state: EditorState): EditorState {
+  const ring = state.killRing
+  if (ring === undefined || ring.length === 0) return state
+  const { killAppendNext: _killAppendNext, killIndex: _killIndex, yankSpan: _yankSpan, ...base } = state
+  const inserted = insertText(base, ring[0]!)
+  return inserted.row === state.row
+    ? { ...inserted, killIndex: 0, yankSpan: { row: state.row, start: state.col, end: inserted.col } }
+    : { ...inserted, killIndex: 0 }
+}
+
+/**
+ * `yank-pop`: replaces the span the last `yank` (or `yank-pop`) inserted with
+ * the next-older ring entry, wrapping back to the newest after the oldest. A
+ * no-op without a live span (never yanked, or any other action intervened).
+ */
+function yankPop(state: EditorState): EditorState {
+  const ring = state.killRing
+  const span = state.yankSpan
+  if (ring === undefined || ring.length === 0 || span === undefined) return state
+  if (span.row >= state.lines.length) return state
+  const nextIndex = ((state.killIndex ?? 0) + 1) % ring.length
+  const replacement = ring[nextIndex]!
+  const line = state.lines[span.row]!
+  const newLine = line.slice(0, span.start) + replacement + line.slice(span.end)
+  const lines = [...state.lines]
+  lines[span.row] = newLine
+  const newEnd = span.start + replacement.length
+  // Ring entries replaced here are single-row by the same span invariant (the
+  // span only exists when the yanked entry had no newline), so the replacement
+  // cannot change the row count and the cursor lands at the new text's end.
+  const { killAppendNext: _killAppendNext, ...base } = state
+  return {
+    ...base,
+    lines,
+    row: span.row,
+    col: newEnd,
+    killIndex: nextIndex,
+    yankSpan: { row: span.row, start: span.start, end: newEnd },
+  }
+}
+
+/**
+ * `complete`: replaces the WHOLE buffer with `text` (a `/name` completion
+ * chosen by the caller's candidate list), cursor at its end. A content
+ * mutation in every respect — exits history navigation and ends any kill/yank
+ * sequence. Splitting on `\n` keeps it total even though command names never
+ * contain one.
+ */
+function complete(state: EditorState, text: string): EditorState {
+  const { killAppendNext: _killAppendNext, killIndex: _killIndex, yankSpan: _yankSpan, ...base } = state
+  const parts = normalizeNewlines(text).split('\n')
+  const lines = parts.length > 0 ? parts : ['']
+  return exitHistoryNav({ ...base, lines, ...cursorAtEnd(lines) })
+}
+
 function submit(state: EditorState): ReduceResult {
   const joined = state.lines.join('\n')
   const trimmed = joined.endsWith('\n') ? joined.slice(0, -1) : joined
@@ -258,5 +413,12 @@ function submit(state: EditorState): ReduceResult {
   // line) but must not park '' in history, where up/down navigation would
   // later walk blank entries.
   const history = trimmed === '' ? [...state.history] : [...state.history, trimmed]
-  return { state: emptyEditor(history), submitted: trimmed }
+  const fresh = emptyEditor(history)
+  // The kill ring deliberately SURVIVES a submit — killing in one prompt and
+  // yanking in the next is the ring's whole point (Emacs keeps it across
+  // minibuffer reads too). All sequence-progress state (append run, rotation
+  // index, yank span) dies with the buffer, enforced by construction: the
+  // fresh state carries none of it.
+  const next: EditorState = state.killRing === undefined ? fresh : { ...fresh, killRing: state.killRing }
+  return { state: next, submitted: trimmed }
 }

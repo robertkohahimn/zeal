@@ -55,14 +55,16 @@
  * flow through `dispatcher.dispatch()` like any other command and their
  * `uiText` renders as an ordinary notice.
  *
- * Slash-command autocomplete hint (I6a, final-review fix wave): while the
- * current input buffer starts with `/`, a dim one-line hint renders directly
- * below the editor listing up to 6 matching command names from `dispatcher.
- * completions(currentLine)` — DISPLAY ONLY, no tab-cycling or selection (spec
- * §3.4's "slash-command autocomplete menu" is explicitly narrowed to this in
- * §8's amendment; see that file). `currentLine` is tracked via `InputEditor`'s
- * `onChange` prop (its own module doc explains why a plain `useEffect` there,
- * not `onSubmit`, is the right signal for this).
+ * Slash-command autocomplete (I6a, upgraded in v2 from a display-only hint
+ * to Tab cycling): `App` supplies the completion SOURCE —
+ * `dispatcher.completions(line)` capped at {@link AUTOCOMPLETE_MAX} — via
+ * `InputEditor`'s `getCompletions` prop. `InputEditor` owns everything
+ * downstream: the dim candidate hint line (inside the editor border, the
+ * selected candidate in inverse video), Tab/Shift+Tab cycling with the
+ * anchored prefix, and the buffer replacement through the reducer's
+ * `complete` action. This keeps the selection state component-local —
+ * hoisting it here would mean lifting keystroke-derived state out of the
+ * component that receives the keystrokes.
  *
  * Interaction-pending / picker-open editor inertness (carry-forward 1):
  * `InputEditor` stays MOUNTED the whole time (never conditionally
@@ -160,9 +162,6 @@ export function App(props: AppProps): JSX.Element {
   const [dispatcher, setDispatcher] = useState<CommandDispatcher>(props.dispatcher)
   const [picker, setPicker] = useState<PickerState | undefined>(undefined)
   const [ctrlCHint, setCtrlCHint] = useState(false)
-  // I6a: the uncommitted input buffer, mirrored from `InputEditor`'s
-  // `onChange` — drives the autocomplete hint line below the editor.
-  const [currentLine, setCurrentLine] = useState('')
   // Mirrors `resumingRef` below for rendering (editor inertness, `<Box
   // display>`) — see IMPORTANT 5's fix note on why the ref, not this state,
   // is the actual re-entry guard.
@@ -289,9 +288,11 @@ export function App(props: AppProps): JSX.Element {
   // trade-off over widening `StatusBar`.
   const displayStatus: StatusModel = ctrlCHint ? { ...state.status, retry: CTRL_C_HINT } : state.status
 
-  // I6a: up to AUTOCOMPLETE_MAX matching command names, display only — no
-  // tab-cycling or selection (see the module doc comment).
-  const completions = currentLine.startsWith('/') ? dispatcher.completions(currentLine).slice(0, AUTOCOMPLETE_MAX) : []
+  // I6a (v2): the completion source handed to `InputEditor` — merged
+  // local+seam command names from the dispatcher, capped so the cycled list
+  // is exactly the list the hint shows. Pure, as `InputEditor`'s
+  // `getCompletions` contract requires (it runs inside state updaters).
+  const completionsFor = (line: string): string[] => dispatcher.completions(line).slice(0, AUTOCOMPLETE_MAX)
 
   return (
     <Box flexDirection="column">
@@ -307,8 +308,7 @@ export function App(props: AppProps): JSX.Element {
         />
       )}
       <Box display={editorInert ? 'none' : 'flex'} flexDirection="column">
-        <InputEditor onSubmit={handleSubmit} onChange={setCurrentLine} isActive={!editorInert} />
-        {completions.length > 0 && <Text dimColor>{completions.join('  ')}</Text>}
+        <InputEditor onSubmit={handleSubmit} getCompletions={completionsFor} isActive={!editorInert} />
       </Box>
       <StatusBar status={displayStatus} width={width} />
     </Box>

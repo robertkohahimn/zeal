@@ -246,16 +246,22 @@ same machine.
   It never shows raw token counts or a derived dollar cost — the `zai`
   catalogs price every model at 0, so a currency figure would be confidently
   wrong rather than merely absent.
-- Multiline input is via an explicit keybinding, not auto-detection.
-  IME composition guarantees and a kill-ring are out of scope for v1.
+- Multiline input is via an explicit keybinding, not auto-detection. An
+  Emacs-style kill-ring is available: `ctrl+k` kills from the cursor to end
+  of line (at end of line it kills the newline, joining rows), consecutive
+  kills accumulate into one ring entry, `ctrl+y` yanks the newest entry,
+  and `alt+y` rotates older entries in place. The ring survives submitting
+  a prompt. IME composition guarantees remain out of scope.
 - GLM reasoning renders always-dimmed, with no toggle to show/hide it; tool
   call panels show a fixed-size preview with no collapse/expand interaction;
   and a running bash call shows only a spinner until it settles — its output
   is not streamed live, only shown as a preview once the call finishes. See
   the design spec's §8 ("Out of scope for v1") for the full rationale on each.
-- While the input line starts with `/`, a dim hint line under the editor
-  lists up to 6 matching command names — display only, there is no
-  tab-cycling or selection.
+- While the input line starts with `/`, a dim hint line inside the editor
+  lists up to 6 matching command names; `tab` cycles forward through them
+  (`shift+tab` backward), replacing the input with the selected command —
+  highlighted in the hint — and a unique match completes with a trailing
+  space ready for its argument.
 
 ## Platform support
 

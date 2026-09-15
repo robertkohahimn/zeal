@@ -2,8 +2,9 @@
  * Thin `useInput`/`usePaste` → `EditorAction` mapping over the pure reducer
  * in `../editor.ts` — all editing policy (the A6 v1 boundary: multiline
  * only via an explicit keybinding, bracketed-paste unwrapping, history
- * recall; no IME guarantees, no kill-ring) lives there and is unit-tested
- * without Ink. This component only decides WHICH action a keypress maps to.
+ * recall; plus the v2 kill-ring and Tab-completion buffer replacement; no
+ * IME guarantees) lives there and is unit-tested without Ink. This
+ * component only decides WHICH action a keypress maps to.
  *
  * Key → action mapping:
  * - `return` (bare `\r`, `key.return && !key.meta`) → `submit`.
@@ -18,6 +19,14 @@
  *   the Ink-level test below), and genuine pasted content is intercepted
  *   entirely on the separate `usePaste` channel below — it never reaches
  *   this single-char classifier at all (see "Paste handling").
+ * - `tab`/`shift+tab` → slash-command completion cycling (v2) — see the
+ *   "Tab completion" section below. Ink reports both with `key.tab` (bare
+ *   `\t`, and `\x1b[Z` for shift+tab, whose CSI `[Z` final byte its parser
+ *   additionally flags `shift`) and `input === ''` (`tab` is in Ink's
+ *   `nonAlphanumericKeys`, so its text is suppressed), which is also why
+ *   Tab previously fell through the insert branch as a silent no-op.
+ * - `ctrl+k` → `kill-line`, `ctrl+y` → `yank`, `alt+y` → `yank-pop` (v2
+ *   kill-ring; the reducer owns all the semantics, this layer only maps).
  * - arrows: `left`/`right` always move the cursor. `up`/`down` move the
  *   cursor within multiline content UNLESS the cursor is already at the
  *   start of the buffer (row 0, col 0 — for `up`) or the end of the buffer
@@ -32,6 +41,23 @@
  *   distinct VT sequence from backspace) has no corresponding action in the
  *   v1 `EditorAction` union and is intentionally a no-op here.
  * - anything else single-character and non-modified → `insert`.
+ *
+ * Tab completion (v2, supersedes I6a's display-only hint): when a
+ * `getCompletions` prop is supplied and the buffer starts with `/`, Tab
+ * cycles forward through the candidate list (Shift+Tab backward), REPLACING
+ * the buffer with the selected candidate via the reducer's `complete`
+ * action; a unique FRESH match completes with a trailing space, ready for
+ * the command's argument (shell convention). The candidate list is anchored
+ * to the prefix the cycling STARTED from — without the anchor, the first
+ * Tab's buffer replacement would shrink `getCompletions(buffer)` down to
+ * just the selected candidate and kill the cycle. Any other editor action
+ * (typing, deleting, history, submit, cursor moves) re-anchors by clearing
+ * the anchor, exactly like the shell. The dim candidate hint line renders
+ * HERE (inside the editor border), not in `App` — the selection state that
+ * highlights the active candidate is component-local. Tab outside a `/`
+ * line, or with no matching candidates, is a deliberate no-op (v1 already
+ * never inserted a literal tab: Ink suppresses tab's text, so the insert
+ * branch's `length === 1` guard never saw it).
  *
  * Paste handling (fix round 1 finding 1): Ink 7.1's own `input-parser.js`
  * already recognizes bracketed-paste framing (`\x1b[200~…\x1b[201~`) and, by
@@ -70,10 +96,12 @@
  * rather than walked key-by-key — unlike
  * `InteractionPanel`'s hotkey-driven views, free text entry is exactly
  * where a multi-char chunk is expected and desired. Trade-off accepted for
- * v1: if a control byte such as ctrl+w's 0x17 ever lands fused into the
- * same multi-char terminal-read chunk as ordinary text (rather than as its
- * own discrete keystroke), it is inserted as a literal character instead of
- * triggering `delete-word`; a standalone ctrl+w keystroke is unaffected.
+ * v1: if a control byte such as ctrl+w's 0x17 (or tab's 0x09, which Ink's
+ * parser equally does not split out of a text segment) ever lands fused
+ * into the same multi-char terminal-read chunk as ordinary text (rather
+ * than as its own discrete keystroke), it is inserted as a literal
+ * character instead of triggering `delete-word`/completion; standalone
+ * ctrl+w or Tab keystrokes are unaffected.
  *
  * Same-tick bursts (fix round 1 finding 2): the very first version of this
  * component computed `editorReduce(state, action)` against `state` closed
@@ -140,6 +168,16 @@ export interface InputEditorProps {
    * `onSubmit`.
    */
   onChange?: (text: string) => void
+  /**
+   * Slash-command completion source (v2): returns the `/name` candidates for
+   * the given input line, caller-sorted and caller-capped. When supplied and
+   * the buffer starts with `/`, Tab cycles forward through the candidates
+   * (Shift+Tab backward) replacing the buffer with the selection — see the
+   * module doc's "Tab completion" section. MUST be pure: it is invoked
+   * inside state updaters, which React Strict Mode double-invokes in
+   * development, and at render time for the hint line.
+   */
+  getCompletions?: (line: string) => string[]
   /** Optional seed history (e.g. restored from a prior session), oldest first. */
   history?: string[]
   /**
@@ -154,6 +192,14 @@ export interface InputEditorProps {
 interface UiState {
   editor: EditorState
   submittedLog: string[]
+  /**
+   * The anchored Tab-completion session, if any: the prefix cycling started
+   * from plus the currently selected candidate index into
+   * `getCompletions(prefix)`. Part of committed state (not a ref) so
+   * same-tick Tab bursts thread through ordered functional updates, exactly
+   * like every other keystroke — and cleared by any non-Tab action.
+   */
+  completion?: { prefix: string; index: number }
 }
 
 function initialUiState(history?: string[]): UiState {
@@ -164,7 +210,7 @@ function initialUiState(history?: string[]): UiState {
 type DispatchInput = EditorAction | ((prev: EditorState) => EditorAction)
 
 export function InputEditor(props: InputEditorProps): JSX.Element {
-  const { onSubmit, onChange, history, isActive = true } = props
+  const { onSubmit, onChange, history, isActive = true, getCompletions } = props
   const [ui, setUi] = useState<UiState>(() => initialUiState(history))
   const flushedCountRef = useRef(0)
 
@@ -182,9 +228,56 @@ export function InputEditor(props: InputEditorProps): JSX.Element {
       const action = typeof input === 'function' ? input(prev.editor) : input
       const result = editorReduce(prev.editor, action)
       if (result.submitted === undefined) {
-        return result.state === prev.editor ? prev : { ...prev, editor: result.state }
+        if (result.state === prev.editor && prev.completion === undefined) return prev
+        // Any editor action other than Tab-cycling re-anchors completion:
+        // the buffer changed shape, so the old prefix's candidate list is
+        // stale (see the module doc's "Tab completion" section).
+        const { completion: _completion, ...rest } = prev
+        return { ...rest, editor: result.state }
       }
-      return { editor: result.state, submittedLog: [...prev.submittedLog, result.submitted] }
+      const { completion: _completion, ...rest } = prev
+      return { ...rest, editor: result.state, submittedLog: [...prev.submittedLog, result.submitted] }
+    })
+  }
+
+  /**
+   * Tab/Shift+Tab (v2): compute the anchored candidate list and replace the
+   * buffer with the next selection. Lives inside the functional updater for
+   * the same reason every other keystroke does ("Same-tick bursts"): the
+   * buffer and anchor are read from `prev`, never a render closure.
+   * `getCompletions` must be pure (it runs inside the updater, which
+   * Strict Mode double-invokes) — the App-supplied `dispatcher.completions`
+   * is.
+   */
+  const cycleCompletion = (backward: boolean): void => {
+    setUi((prev) => {
+      if (getCompletions === undefined) return prev
+      const buffer = prev.editor.lines.join('\n')
+      if (!buffer.startsWith('/')) return prev
+      const anchored =
+        prev.completion !== undefined &&
+        buffer.toLowerCase().startsWith(prev.completion.prefix.toLowerCase())
+      // NB: the condition is restated inline (not via `anchored`) so the true
+      // branch's `prev.completion` is narrowed to non-undefined for TS.
+      const anchor =
+        prev.completion !== undefined && buffer.toLowerCase().startsWith(prev.completion.prefix.toLowerCase())
+          ? prev.completion
+          : { prefix: buffer, index: -1 }
+      const candidates = getCompletions(anchor.prefix)
+      if (candidates.length === 0) return prev
+      const index = anchored
+        ? (anchor.index + (backward ? -1 : 1) + candidates.length) % candidates.length
+        : backward
+          ? candidates.length - 1
+          : 0
+      const selected = candidates[index]!
+      // Shell convention: a unique FRESH match completes with a trailing
+      // space so the cursor lands ready for the command's argument. Once
+      // cycling has begun the raw candidate is used, so repeated Tab on a
+      // single candidate never accumulates spaces.
+      const text = candidates.length === 1 && anchor.index === -1 ? `${selected} ` : selected
+      const result = editorReduce(prev.editor, { type: 'complete', text })
+      return { ...prev, editor: result.state, completion: { prefix: anchor.prefix, index } }
     })
   }
 
@@ -245,6 +338,13 @@ export function InputEditor(props: InputEditorProps): JSX.Element {
         dispatch({ type: 'newline' })
         return
       }
+      // Tab / Shift+Tab — slash-command completion cycling (v2). Input is ''
+      // here (Ink suppresses tab's text), so there is no insert branch to
+      // shadow; outside a `/` line or with no candidates this is a no-op.
+      if (key.tab) {
+        cycleCompletion(key.shift === true)
+        return
+      }
       if (key.leftArrow) {
         dispatch({ type: 'left' })
         return
@@ -277,6 +377,20 @@ export function InputEditor(props: InputEditorProps): JSX.Element {
         dispatch({ type: 'delete-word' })
         return
       }
+      // v2 kill-ring bindings — semantics live entirely in the reducer
+      // (`editor.ts`'s killLine/yank/yankPop); this layer only maps bytes.
+      if (key.ctrl && stripped === 'k') {
+        dispatch({ type: 'kill-line' })
+        return
+      }
+      if (key.ctrl && stripped === 'y') {
+        dispatch({ type: 'yank' })
+        return
+      }
+      if (key.meta && stripped === 'y') {
+        dispatch({ type: 'yank-pop' })
+        return
+      }
       if (key.backspace) {
         dispatch({ type: 'backspace' })
         return
@@ -293,12 +407,39 @@ export function InputEditor(props: InputEditorProps): JSX.Element {
   // scope is the editing model, not a custom cursor renderer; the terminal's
   // own cursor still tracks the underlying raw-mode input.
   const { editor } = ui
+
+  // v2 completion hint (moved here from App): list the candidates for the
+  // ANCHORED prefix while Tab-cycling (so the list doesn't collapse to the
+  // selected candidate after the first Tab), or for the raw buffer before
+  // any Tab. The selected candidate renders inverse-video. Rendering inside
+  // the editor border also groups the hint with the line it completes.
+  const buffer = editor.lines.join('\n')
+  const anchored =
+    ui.completion !== undefined && buffer.toLowerCase().startsWith(ui.completion.prefix.toLowerCase())
+  const hintPrefix = ui.completion !== undefined && anchored ? ui.completion.prefix : buffer
+  const hintCandidates =
+    getCompletions !== undefined && buffer.startsWith('/') ? getCompletions(hintPrefix) : []
+  const activeIndex = ui.completion !== undefined && anchored ? ui.completion.index : -1
+
   return (
     <Box flexDirection="column" borderStyle="round" paddingX={1}>
       {editor.lines.map((line, index) => (
         <Text key={index}>{index === 0 ? `> ${line}` : `  ${line}`}</Text>
       ))}
-      <Text dimColor>enter submits · alt+enter/ctrl+j newline · up/down history · ctrl+w delete word</Text>
+      {hintCandidates.length > 0 && (
+        <Text dimColor>
+          {hintCandidates.flatMap((candidate, index) => [
+            ...(index > 0 ? ['  '] : []),
+            <Text key={candidate} inverse={index === activeIndex}>
+              {candidate}
+            </Text>,
+          ])}
+        </Text>
+      )}
+      <Text dimColor>
+        enter submits · alt+enter/ctrl+j newline · up/down history · ctrl+w delete word · ctrl+k kill ·
+        ctrl+y yank · tab completes
+      </Text>
     </Box>
   )
 }

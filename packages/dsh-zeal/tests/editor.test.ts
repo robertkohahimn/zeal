@@ -319,3 +319,169 @@ describe('editorReduce — history-prev/history-next (replace buffer, restore th
     expect(s1.col).toBe(1)
   })
 })
+
+describe('editorReduce — complete (v2 slash-command Tab completion)', () => {
+  it('replaces the whole buffer with the completion text, cursor at its end', () => {
+    const s0 = run(emptyEditor(), { type: 'insert', text: '/mo' }, { type: 'left' })
+    const s1 = editorReduce(s0, { type: 'complete', text: '/model glm-4.7' }).state
+    expect(s1.lines).toEqual(['/model glm-4.7'])
+    expect(s1.row).toBe(0)
+    expect(s1.col).toBe('/model glm-4.7'.length)
+  })
+
+  it('exits history navigation, adopting the completion as the live draft', () => {
+    const navigating = editorReduce(emptyEditor(['/old']), { type: 'history-prev' }).state
+    expect(navigating.historyCursor).toBe(0)
+    const s = editorReduce(navigating, { type: 'complete', text: '/help' }).state
+    expect(s.lines).toEqual(['/help'])
+    expect(s.historyCursor).toBeUndefined()
+  })
+
+  it('ends any in-progress kill sequence while the ring itself survives', () => {
+    const killed = run(emptyEditor(), { type: 'insert', text: 'abc' }, { type: 'left' }, { type: 'left' }, { type: 'kill-line' })
+    expect(killed.killAppendNext).toBe(true)
+    const s = editorReduce(killed, { type: 'complete', text: '/help' }).state
+    expect(s.killAppendNext).toBeUndefined()
+    expect(s.killIndex).toBeUndefined()
+    expect(s.yankSpan).toBeUndefined()
+    expect(s.killRing).toEqual(['bc'])
+  })
+})
+
+describe('editorReduce — kill-line / yank / yank-pop (v2 kill-ring)', () => {
+  it('kills from the cursor to end of line, parking the text in the ring', () => {
+    const s0 = run(emptyEditor(), { type: 'insert', text: 'hello' }, { type: 'left' }, { type: 'left' })
+    const s1 = editorReduce(s0, { type: 'kill-line' }).state
+    expect(s1.lines).toEqual(['hel'])
+    expect(s1.col).toBe(3)
+    expect(s1.killRing).toEqual(['lo'])
+    expect(s1.killAppendNext).toBe(true)
+  })
+
+  it('at end of line kills the newline itself, joining the rows (Emacs C-k)', () => {
+    const s0 = run(emptyEditor(), { type: 'insert', text: 'ab' }, { type: 'newline' }, { type: 'insert', text: 'cd' }, { type: 'up' })
+    expect(s0.row).toBe(0)
+    expect(s0.col).toBe(2)
+    const s1 = editorReduce(s0, { type: 'kill-line' }).state
+    expect(s1.lines).toEqual(['abcd'])
+    expect(s1.killRing).toEqual(['\n'])
+  })
+
+  it('at end of the LAST row there is nothing left to kill — an exact no-op', () => {
+    const s0 = run(emptyEditor(), { type: 'insert', text: 'abc' })
+    expect(editorReduce(s0, { type: 'kill-line' }).state).toBe(s0)
+  })
+
+  it('consecutive kills append into one multi-line ring entry; any other action breaks the run', () => {
+    // Cursor at row 0, col 1 of ['ab','cd','ef']: three back-to-back kills
+    // accumulate 'b' + '\n' + 'cd' into a single entry.
+    const s0 = run(
+      emptyEditor(),
+      { type: 'insert', text: 'ab' },
+      { type: 'newline' },
+      { type: 'insert', text: 'cd' },
+      { type: 'newline' },
+      { type: 'insert', text: 'ef' },
+      { type: 'up' },
+      { type: 'up' },
+      { type: 'left' },
+    )
+    expect(s0.row).toBe(0)
+    expect(s0.col).toBe(1)
+    const s1 = run(s0, { type: 'kill-line' })
+    expect(s1.lines).toEqual(['a', 'cd', 'ef'])
+    expect(s1.killRing).toEqual(['b'])
+    const s2 = run(s1, { type: 'kill-line' })
+    expect(s2.lines).toEqual(['acd', 'ef'])
+    expect(s2.killRing).toEqual(['b\n'])
+    const s3 = run(s2, { type: 'kill-line' })
+    expect(s3.lines).toEqual(['a', 'ef'])
+    expect(s3.killRing).toEqual(['b\ncd'])
+    // A cursor move between kills breaks the append run: the next kill
+    // starts a fresh entry instead of extending 'b\ncd'.
+    const s4 = run(s3, { type: 'left' }, { type: 'kill-line' })
+    expect(s4.lines).toEqual(['', 'ef'])
+    expect(s4.killRing).toEqual(['a', 'b\ncd'])
+  })
+
+  it('caps the ring at 10 entries, dropping the oldest', () => {
+    let s = emptyEditor()
+    for (let i = 0; i < 12; i++) {
+      // home first: at end of the (last) row a kill would be a no-op.
+      s = run(s, { type: 'insert', text: `k${i}` }, { type: 'home' }, { type: 'kill-line' })
+    }
+    expect(s.killRing).toHaveLength(10)
+    expect(s.killRing![0]).toBe('k11')
+    expect(s.killRing![9]).toBe('k2')
+  })
+
+  it('yank inserts the newest entry at the cursor and records a replaceable span', () => {
+    const killed = run(emptyEditor(), { type: 'insert', text: 'world' }, { type: 'home' }, { type: 'kill-line' })
+    const s0 = run(killed, { type: 'insert', text: 'hello ' })
+    const s1 = editorReduce(s0, { type: 'yank' }).state
+    expect(s1.lines).toEqual(['hello world'])
+    expect(s1.col).toBe('hello world'.length)
+    expect(s1.yankSpan).toEqual({ row: 0, start: 6, end: 11 })
+  })
+
+  it('yank with an empty ring is an exact no-op', () => {
+    const s0 = emptyEditor()
+    expect(editorReduce(s0, { type: 'yank' }).state).toBe(s0)
+  })
+
+  it('yanking a multi-line entry spans rows and therefore tracks no replaceable span (yank-pop then no-ops)', () => {
+    // Cursor at row 1, col 0 of ['ab','cd','ef']: kill 'cd', then kill the
+    // newline (row 1 joins row 2) — one appended entry 'cd\n'.
+    const killed = run(
+      emptyEditor(),
+      { type: 'insert', text: 'ab' },
+      { type: 'newline' },
+      { type: 'insert', text: 'cd' },
+      { type: 'newline' },
+      { type: 'insert', text: 'ef' },
+      { type: 'up' },
+      { type: 'home' },
+      { type: 'kill-line' },
+      { type: 'kill-line' },
+    )
+    expect(killed.killRing).toEqual(['cd\n'])
+    expect(killed.lines).toEqual(['ab', 'ef'])
+    const s = editorReduce(killed, { type: 'yank' }).state
+    expect(s.lines).toEqual(['ab', 'cd', 'ef'])
+    expect(s.yankSpan).toBeUndefined()
+    expect(editorReduce(s, { type: 'yank-pop' }).state).toBe(s)
+  })
+
+  it('yank-pop replaces the yanked span with the next-older entry, wrapping to newest', () => {
+    let s = emptyEditor()
+    s = run(s, { type: 'insert', text: 'one' }, { type: 'home' }, { type: 'kill-line' }) // ring ['one']
+    s = run(s, { type: 'insert', text: 'two' }, { type: 'home' }, { type: 'kill-line' }) // ring ['two','one']
+    s = editorReduce(s, { type: 'yank' }).state // buffer 'two'
+    expect(s.lines).toEqual(['two'])
+    const p1 = editorReduce(s, { type: 'yank-pop' }).state
+    expect(p1.lines).toEqual(['one'])
+    expect(p1.col).toBe(3)
+    const p2 = editorReduce(p1, { type: 'yank-pop' }).state
+    expect(p2.lines).toEqual(['two']) // wrapped back to the newest entry
+  })
+
+  it('yank-pop without a live yank is an exact no-op', () => {
+    const s = run(emptyEditor(), { type: 'insert', text: 'x' }, { type: 'home' }, { type: 'kill-line' })
+    expect(s.yankSpan).toBeUndefined()
+    expect(editorReduce(s, { type: 'yank-pop' }).state).toBe(s)
+  })
+
+  it('the ring survives submit; the append run, rotation index, and yank span do not', () => {
+    let s = emptyEditor(['earlier'])
+    s = run(s, { type: 'insert', text: 'abc' }, { type: 'home' }, { type: 'kill-line' })
+    s = editorReduce(s, { type: 'insert', text: 'fresh' }).state
+    const result = editorReduce(s, { type: 'submit' })
+    expect(result.state.killRing).toEqual(['abc'])
+    expect(result.state.killAppendNext).toBeUndefined()
+    expect(result.state.killIndex).toBeUndefined()
+    expect(result.state.yankSpan).toBeUndefined()
+    // The carried ring still yanks into the next prompt.
+    const next = editorReduce(result.state, { type: 'yank' }).state
+    expect(next.lines).toEqual(['abc'])
+  })
+})
