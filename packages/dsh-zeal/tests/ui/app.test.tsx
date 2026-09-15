@@ -325,10 +325,11 @@ describe('App', () => {
     expect(onResume).toHaveBeenCalledWith('sess-a')
   })
 
-  // I6a (final-review fix wave): while the input starts with '/', a dim hint
-  // line under the editor lists matching command names from
-  // `dispatcher.completions(currentLine)` — display only.
-  describe('slash-command autocomplete hint (I6a)', () => {
+  // I6a → v2: while the input starts with '/', the editor's hint line lists
+  // matching command names from the dispatcher (capped at 6), and Tab cycles
+  // them — the selection state lives in `InputEditor`, App only supplies the
+  // completion source via its `getCompletions` prop.
+  describe('slash-command autocomplete (I6a, v2 Tab cycling)', () => {
     it('shows no hint before any "/" is typed', async () => {
       const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
       const driver = fakeDriver()
@@ -378,6 +379,25 @@ describe('App', () => {
       for (let i = 1; i <= 6; i++) expect(frame).toContain(`/cmd${i}`)
       expect(frame).not.toContain('/cmd7')
       expect(frame).not.toContain('/cmd8')
+    })
+
+    it('tab completes a command end-to-end through the real dispatcher source, ready to submit', async () => {
+      const store = new ZealStore({ provider: 'zai', model: 'glm-5.2' })
+      const driver = fakeDriver()
+      const { stdin, lastFrame } = render(
+        <App store={store} driver={driver} dispatcher={buildDispatcher()} onQuit={vi.fn()} onResume={vi.fn()} />,
+      )
+      // Of the four fakeLocals only 'model' starts with '/m' — a unique
+      // fresh match, so Tab completes to '/model ' (argument space).
+      await press(stdin, '/m', '\t')
+      await settle()
+      expect(lastFrame()!).toContain('> /model')
+      // Submitting the completed line dispatches through the local command,
+      // exactly as typing it out would have.
+      await press(stdin, 'glm-4.7', '\r')
+      await settle()
+      expect(lastFrame()!).toContain('switched to glm-4.7')
+      expect(driver.sendCalls).toEqual([])
     })
   })
 

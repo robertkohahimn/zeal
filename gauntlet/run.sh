@@ -90,14 +90,17 @@ else
   echo "gauntlet/run.sh: ZEAL_SKIP_BUILD set, skipping build"
 fi
 
-PACK_JSON="$(cd "$BUNDLE_DIR" && pnpm pack --ignore-scripts --json --pack-destination "$SCRATCH")"
+PACK_JSON="$(cd "$BUNDLE_DIR" && pnpm pack --config.ignore-scripts=true --json --pack-destination "$SCRATCH")"
 TARBALL_PATH="$(node -e "process.stdout.write(JSON.parse(process.argv[1]).filename)" "$PACK_JSON")"
 echo "gauntlet/run.sh: packed tarball=$TARBALL_PATH"
 
 # --- 2. Install the bundle + code-runtime into a fresh `zeal` profile ------
 echo "gauntlet/run.sh: installing zeal profile..."
-DSH_HOME="$DSH_HOME_DIR" pnpm dlx "@deepseek-ai/dsh@$DSH_VERSION" plugin --profile zeal add \
-  "$TARBALL_PATH" @deepseek-ai/dsh-code-runtime-worker-thread
+# Run from $SCRATCH, not the repo root: `pnpm dlx` reads the cwd's .npmrc, and
+# this workspace's `auto-install-peers=false` would strip dsh's own peer
+# closure (e.g. @deepseek-ai/cordis-plugin-group) and break `dsh` at boot.
+(cd "$SCRATCH" && DSH_HOME="$DSH_HOME_DIR" pnpm dlx "@deepseek-ai/dsh@$DSH_VERSION" plugin --profile zeal add \
+  "$TARBALL_PATH" @deepseek-ai/dsh-code-runtime-worker-thread)
 
 # --- 3. Append the gauntlet overlay onto the profile's own patch layer ----
 # A freshly-initialized profile's own cordis.patch.yml is always the literal

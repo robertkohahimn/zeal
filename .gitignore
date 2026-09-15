@@ -4,3 +4,7 @@ lib/
 .sessions/
 .claude/settings.local.json
 .credentials.yaml
+# Local secrets — never commit real API keys (see README "API keys").
+.env
+.env.*
+!.env.example
