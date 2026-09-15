@@ -196,6 +196,18 @@ describe('InputEditor — slash-command Tab completion (v2)', () => {
     expect(onSubmit).toHaveBeenCalledWith('/help ')
   })
 
+  it('repeated tab on a unique match keeps exactly one trailing space (CodeRabbit finding 2)', async () => {
+    const onSubmit = vi.fn()
+    const { stdin } = render(
+      <InputEditor onSubmit={onSubmit} getCompletions={(line) => ['/help'].filter((n) => n.startsWith(line))} />,
+    )
+    // A second Tab used to silently DELETE the space the first one added
+    // (the fresh-match guard keyed on anchor.index === -1 no longer held).
+    await press(stdin, '/h', '\t', '\t', '\t', '\r')
+    expect(onSubmit).toHaveBeenCalledTimes(1)
+    expect(onSubmit).toHaveBeenCalledWith('/help ')
+  })
+
   it('tab cycles forward through multiple candidates and shift+tab cycles back, wrapping', async () => {
     const candidates = ['/alpha', '/beta', '/gamma']
     const { stdin, lastFrame } = render(

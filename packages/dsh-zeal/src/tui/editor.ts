@@ -66,8 +66,12 @@ export interface EditorState {
   killIndex?: number
   /** Internal: true while the PREVIOUS action was `kill-line`, so consecutive kills append to the newest entry (Emacs semantics). */
   killAppendNext?: boolean
-  /** Internal: the single-row span the last yank inserted, which `yank-pop` replaces in place; cleared by every other action. */
-  yankSpan?: { row: number; start: number; end: number }
+  /**
+   * Internal: the buffer span the last yank inserted — as start/end cursor
+   * positions, so it may cross rows for multi-line entries — which `yank-pop`
+   * replaces in place; cleared by every other action.
+   */
+  yankSpan?: { startRow: number; startCol: number; endRow: number; endCol: number }
 }
 
 export type EditorAction =
@@ -346,49 +350,64 @@ function killLine(state: EditorState): EditorState {
 
 /**
  * `yank`: inserts the NEWEST ring entry at the cursor (Emacs C-y always yanks
- * the head — the rotation pointer only advances via `yank-pop`). The yank span
- * is tracked only when the entry landed on a single row (entries CAN contain
- * newlines via `killLine`'s EOL branch); a multi-row yank gets no span, so a
- * following `yank-pop` is a no-op rather than a wrongly-ranged replacement.
+ * the head — the rotation pointer only advances via `yank-pop`). The span the
+ * yank occupies is exactly the range between the pre-insert cursor and the
+ * post-insert cursor: `insertText` already spliced any embedded newlines into
+ * real rows and left the cursor at the inserted text's end, so the span is
+ * correct for single- AND multi-line entries alike.
  */
 function yank(state: EditorState): EditorState {
   const ring = state.killRing
   if (ring === undefined || ring.length === 0) return state
   const { killAppendNext: _killAppendNext, killIndex: _killIndex, yankSpan: _yankSpan, ...base } = state
   const inserted = insertText(base, ring[0]!)
-  return inserted.row === state.row
-    ? { ...inserted, killIndex: 0, yankSpan: { row: state.row, start: state.col, end: inserted.col } }
-    : { ...inserted, killIndex: 0 }
+  return {
+    ...inserted,
+    killIndex: 0,
+    yankSpan: { startRow: state.row, startCol: state.col, endRow: inserted.row, endCol: inserted.col },
+  }
 }
 
 /**
  * `yank-pop`: replaces the span the last `yank` (or `yank-pop`) inserted with
  * the next-older ring entry, wrapping back to the newest after the oldest. A
  * no-op without a live span (never yanked, or any other action intervened).
+ *
+ * The span may cross rows (a multi-line yank), and the rotated-to entry may
+ * itself contain newlines — the replacement splices `replacement.split('\n')`
+ * into real rows exactly like `insertText` does, rather than embedding `\n`
+ * inside a single `lines` element (which would silently corrupt the row model
+ * and every col arithmetic built on it). Ring entries cannot contain `\r`:
+ * every producer path (`insertText`, the `newline` action) normalizes CR away
+ * before text ever lands in the buffer.
  */
 function yankPop(state: EditorState): EditorState {
   const ring = state.killRing
   const span = state.yankSpan
   if (ring === undefined || ring.length === 0 || span === undefined) return state
-  if (span.row >= state.lines.length) return state
+  if (span.endRow >= state.lines.length) return state
   const nextIndex = ((state.killIndex ?? 0) + 1) % ring.length
   const replacement = ring[nextIndex]!
-  const line = state.lines[span.row]!
-  const newLine = line.slice(0, span.start) + replacement + line.slice(span.end)
-  const lines = [...state.lines]
-  lines[span.row] = newLine
-  const newEnd = span.start + replacement.length
-  // Ring entries replaced here are single-row by the same span invariant (the
-  // span only exists when the yanked entry had no newline), so the replacement
-  // cannot change the row count and the cursor lands at the new text's end.
+  const parts = replacement.split('\n')
+  const left = state.lines[span.startRow]!.slice(0, span.startCol)
+  const right = state.lines[span.endRow]!.slice(span.endCol)
+  const spliced =
+    parts.length === 1
+      ? [left + parts[0]! + right]
+      : [left + parts[0]!, ...parts.slice(1, -1), parts[parts.length - 1]! + right]
+  const lines = [...state.lines.slice(0, span.startRow), ...spliced, ...state.lines.slice(span.endRow + 1)]
+  // Cursor lands at the replacement's true end: the last spliced row's
+  // replacement boundary (before any `right` remainder spliced after it).
+  const endRow = span.startRow + spliced.length - 1
+  const endCol = parts.length === 1 ? span.startCol + parts[0]!.length : parts[parts.length - 1]!.length
   const { killAppendNext: _killAppendNext, ...base } = state
   return {
     ...base,
     lines,
-    row: span.row,
-    col: newEnd,
+    row: endRow,
+    col: endCol,
     killIndex: nextIndex,
-    yankSpan: { row: span.row, start: span.start, end: newEnd },
+    yankSpan: { startRow: span.startRow, startCol: span.startCol, endRow, endCol },
   }
 }
 

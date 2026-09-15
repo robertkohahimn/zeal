@@ -46,11 +46,12 @@
  * `getCompletions` prop is supplied and the buffer starts with `/`, Tab
  * cycles forward through the candidate list (Shift+Tab backward), REPLACING
  * the buffer with the selected candidate via the reducer's `complete`
- * action; a unique FRESH match completes with a trailing space, ready for
- * the command's argument (shell convention). The candidate list is anchored
- * to the prefix the cycling STARTED from — without the anchor, the first
- * Tab's buffer replacement would shrink `getCompletions(buffer)` down to
- * just the selected candidate and kill the cycle. Any other editor action
+ * action; a unique match completes with a trailing space, ready for the
+ * command's argument (shell convention — repeated Tabs keep exactly one
+ * space, since every Tab replaces the whole buffer). The candidate list is
+ * anchored to the prefix the cycling STARTED from — without the anchor, the
+ * first Tab's buffer replacement would shrink `getCompletions(buffer)` down
+ * to just the selected candidate and kill the cycle. Any other editor action
  * (typing, deleting, history, submit, cursor moves) re-anchors by clearing
  * the anchor, exactly like the shell. The dim candidate hint line renders
  * HERE (inside the editor border), not in `App` — the selection state that
@@ -271,11 +272,14 @@ export function InputEditor(props: InputEditorProps): JSX.Element {
           ? candidates.length - 1
           : 0
       const selected = candidates[index]!
-      // Shell convention: a unique FRESH match completes with a trailing
-      // space so the cursor lands ready for the command's argument. Once
-      // cycling has begun the raw candidate is used, so repeated Tab on a
-      // single candidate never accumulates spaces.
-      const text = candidates.length === 1 && anchor.index === -1 ? `${selected} ` : selected
+      // Shell convention: completing a UNIQUE match appends exactly one
+      // trailing space so the cursor lands ready for the command's argument.
+      // No accumulation is possible — every Tab replaces the WHOLE buffer
+      // with `selected + ' '` — and this deliberately ignores anchor.index:
+      // keying the space on "fresh" only would make a second Tab on the same
+      // unique match silently delete the space the first one added
+      // (CodeRabbit PR #2 review, finding 2).
+      const text = candidates.length === 1 ? `${selected} ` : selected
       const result = editorReduce(prev.editor, { type: 'complete', text })
       return { ...prev, editor: result.state, completion: { prefix: anchor.prefix, index } }
     })

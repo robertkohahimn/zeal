@@ -421,7 +421,7 @@ describe('editorReduce — kill-line / yank / yank-pop (v2 kill-ring)', () => {
     const s1 = editorReduce(s0, { type: 'yank' }).state
     expect(s1.lines).toEqual(['hello world'])
     expect(s1.col).toBe('hello world'.length)
-    expect(s1.yankSpan).toEqual({ row: 0, start: 6, end: 11 })
+    expect(s1.yankSpan).toEqual({ startRow: 0, startCol: 6, endRow: 0, endCol: 11 })
   })
 
   it('yank with an empty ring is an exact no-op', () => {
@@ -429,27 +429,57 @@ describe('editorReduce — kill-line / yank / yank-pop (v2 kill-ring)', () => {
     expect(editorReduce(s0, { type: 'yank' }).state).toBe(s0)
   })
 
-  it('yanking a multi-line entry spans rows and therefore tracks no replaceable span (yank-pop then no-ops)', () => {
-    // Cursor at row 1, col 0 of ['ab','cd','ef']: kill 'cd', then kill the
-    // newline (row 1 joins row 2) — one appended entry 'cd\n'.
-    const killed = run(
-      emptyEditor(),
-      { type: 'insert', text: 'ab' },
-      { type: 'newline' },
-      { type: 'insert', text: 'cd' },
-      { type: 'newline' },
-      { type: 'insert', text: 'ef' },
-      { type: 'up' },
-      { type: 'home' },
-      { type: 'kill-line' },
-      { type: 'kill-line' },
-    )
-    expect(killed.killRing).toEqual(['cd\n'])
-    expect(killed.lines).toEqual(['ab', 'ef'])
-    const s = editorReduce(killed, { type: 'yank' }).state
-    expect(s.lines).toEqual(['ab', 'cd', 'ef'])
-    expect(s.yankSpan).toBeUndefined()
-    expect(editorReduce(s, { type: 'yank-pop' }).state).toBe(s)
+  it('yank-pop rotates from a single-line newest into a MULTILINE older entry, splicing real rows (CodeRabbit finding 1)', () => {
+    // ring (newest first): ['X', 'cd\n'] — the multiline entry comes from
+    // two consecutive kills on ['cd','ef'] at row 0 col 0 ('cd', then the
+    // newline joining rows 0+1), the single-line one from a kill AFTER a
+    // submit cleared the buffer (submit preserves the ring by design).
+    let s = emptyEditor()
+    s = run(s, { type: 'insert', text: 'cd' }, { type: 'newline' }, { type: 'insert', text: 'ef' }, { type: 'up' }, { type: 'home' }, { type: 'kill-line' }, { type: 'kill-line' })
+    expect(s.killRing).toEqual(['cd\n'])
+    expect(s.lines).toEqual(['ef'])
+    s = run(s, { type: 'submit' }) // clears the leftover buffer, ring survives
+    s = run(s, { type: 'insert', text: 'X' }, { type: 'home' }, { type: 'kill-line' })
+    expect(s.killRing).toEqual(['X', 'cd\n'])
+    expect(s.lines).toEqual([''])
+
+    // Yank the single-line newest, then rotate into the multiline older
+    // entry: the replacement must become REAL rows, never an embedded '\n'
+    // inside one lines element with a col that counts it as columns.
+    const yanked = editorReduce(s, { type: 'yank' }).state
+    expect(yanked.lines).toEqual(['X'])
+    const popped = editorReduce(yanked, { type: 'yank-pop' }).state
+    expect(popped.lines).toEqual(['cd', ''])
+    expect(popped.lines.some((line) => line.includes('\n'))).toBe(false)
+    expect(popped.row).toBe(1)
+    expect(popped.col).toBe(0)
+
+    // And it wraps back to the newest entry, still spliced correctly.
+    const wrapped = editorReduce(popped, { type: 'yank-pop' }).state
+    expect(wrapped.lines).toEqual(['X'])
+    expect(wrapped.row).toBe(0)
+    expect(wrapped.col).toBe(1)
+  })
+
+  it('a multiline YANK also tracks its cross-row span, so yank-pop still rotates after one', () => {
+    // ring (newest first): ['cd\n', 'X'] — build the single-line entry
+    // first, the multiline one second (two consecutive appends), then clear
+    // the leftover buffer with a submit (ring survives).
+    let s = emptyEditor()
+    s = run(s, { type: 'insert', text: 'X' }, { type: 'home' }, { type: 'kill-line' })
+    s = run(s, { type: 'insert', text: 'cd' }, { type: 'newline' }, { type: 'insert', text: 'ef' }, { type: 'up' }, { type: 'home' }, { type: 'kill-line' }, { type: 'kill-line' })
+    expect(s.killRing).toEqual(['cd\n', 'X'])
+    s = run(s, { type: 'submit' })
+
+    // Yank pulls the multiline NEWEST entry: two real rows, and the span
+    // crosses them — exactly what yank-pop must be able to replace whole.
+    const yanked = editorReduce(s, { type: 'yank' }).state
+    expect(yanked.lines).toEqual(['cd', ''])
+    expect(yanked.yankSpan).toEqual({ startRow: 0, startCol: 0, endRow: 1, endCol: 0 })
+    const popped = editorReduce(yanked, { type: 'yank-pop' }).state
+    expect(popped.lines).toEqual(['X'])
+    expect(popped.row).toBe(0)
+    expect(popped.col).toBe(1)
   })
 
   it('yank-pop replaces the yanked span with the next-older entry, wrapping to newest', () => {
